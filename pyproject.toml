@@ -1,0 +1,21 @@
+[project]
+name = "kcworks-nlp-tools"
+version = "0.1.0"
+description = "Tools for developing NLP applications for KCWorks"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "docx>=0.2.4",
+    "dotenv>=0.9.9",
+    "pandas>=2.2.3",
+    "psutil>=7.0.0",
+    "pymupdf>=1.25.3",
+    "pytesseract>=0.3.13",
+    "requests>=2.32.3",
+    "tensorflow>=2.18.0",
+    "tika>=2.6.0",
+    "transformers>=4.49.0",
+]
+
+[tool.uv.workspace]
+members = ["kcworks-nlp-tools"]
