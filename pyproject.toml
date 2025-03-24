@@ -11,6 +11,7 @@ dependencies = [
     "psutil>=7.0.0",
     "pymupdf>=1.25.3",
     "pytesseract>=0.3.13",
+    "pytest>=8.3.5",
     "requests>=2.32.3",
     "tensorflow>=2.18.0",
     "tika>=2.6.0",
@@ -19,3 +20,27 @@ dependencies = [
 
 [tool.uv.workspace]
 members = ["kcworks-nlp-tools"]
+
+[tool.uv.sources]
+kcworks-nlp-tools = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "kcworks-nlp-tools",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+norecursedirs = [
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    "kcworks_nlp_tools.egg-info",
+    "logs",
+    "legacy",
+]
+
+[tool.coverage.run]
+source = ["kcworks_nlp_tools"]

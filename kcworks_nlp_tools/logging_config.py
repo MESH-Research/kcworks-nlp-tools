@@ -1,6 +1,6 @@
 import logging
 from pathlib import Path
-import config
+import kcworks_nlp_tools.config as config
 
 
 def set_up_logging() -> None:

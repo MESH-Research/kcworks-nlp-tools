@@ -17,8 +17,8 @@ from tika import language, parser, initVM
 from tika import config as tika_config
 
 # from .dependencies import download_tika_binary
-from logging_config import set_up_logging
-import config
+from kcworks_nlp_tools.logging_config import set_up_logging
+import kcworks_nlp_tools.config as config
 
 
 # Make sure large text field in csv can be processed
@@ -91,15 +91,29 @@ class DocumentExtractor:
             logging.warning(f"Unsupported file type for {file_name}. Skipping.")
             return (None, True, False)
 
-    def extract_with_tika(self, file_path: str) -> str | None:
+    def extract_with_tika(self, file_path: str) -> list[str] | None:
         """
         Extract text from a file using Tika.
+
+        Divides the text into chunks of a specified size. Strips the text of
+        newlines, carriage returns, and tabs. (We are expecting to store it in
+        a tab-delimited CSV file, so we need to strip the text of these
+        characters.)
+
+        # TODO: think about how to avoid losing semantic information when
+        # dividing sentences at chunk boundaries
+
+        Args:
+            file_path (str): The path to the file to extract text from.
+
+        Returns:
+            list[str] | None: The extracted text divided into chunks as a list of strings, or None if the extraction fails.
         """
         try:
             parsed = parser.from_file(file_path)
             words = parsed.get("content").split()
             text_chunks = [
-                " ".join(words[i : i + self.chunk_size])
+                " ".join(words[i : i + self.chunk_size]).replace('\n', '').replace('\r', '').replace('\t', '')
                 for i in range(0, len(words), self.chunk_size)
             ]
             return text_chunks
@@ -112,6 +126,9 @@ class DocumentExtractor:
         Extract text from a PDF file.
         Uses PyMuPDF/fitz for text-based PDFs and PyTesseract for image-based PDFs.
         Divides the pages into chunks of a specified size when extracting text.
+        Strips the text of newlines, carriage returns, and tabs. (We are expecting
+        to store it in a tab-delimited CSV file, so we need to strip the text of
+        these characters.)
 
         # TODO: think about how to avoid losing semantic information when
         # dividing sentences at page and chunk boundaries
@@ -175,7 +192,7 @@ class DocumentExtractor:
                         for i in range(chunk_count):
                             chunk = page_text[
                                 i * self.chunk_size : (i + 1) * self.chunk_size
-                            ]
+                            ].replace('\n', '').replace('\r', '').replace('\t', '')
                             chunks.append(chunk)
                         page_texts[page_num + 1] = chunks
 
@@ -364,6 +381,16 @@ class KCWorksCorpusExtractor:
     def __init__(self, config=config):
         self.config = config
 
+        set_up_logging()
+        # download_tika_binary()
+        initVM()
+        print(tika_config.getParsers())
+        print(tika_config.getMimeTypes())
+        print(tika_config.getDetectors())
+        # Make sure the working directories exist
+        os.makedirs(config.DOWNLOADED_FILES_PATH, exist_ok=True)
+        os.makedirs(config.OUTPUT_FILES_PATH, exist_ok=True)
+
     def download_file(
         self,
         file_name: str,
@@ -372,6 +399,7 @@ class KCWorksCorpusExtractor:
         auth_headers: dict,
         max_retries: int = 5,
         backoff_factor: int = 1,
+        max_docs: int = 10,
     ) -> str | None:
         """
         Downloads a file from the specified URL and saves it locally.
@@ -385,7 +413,6 @@ class KCWorksCorpusExtractor:
                 5 is the default value.
             backoff_factor (int, optional): Delay factor for retries.
                 1 is the default value.
-
         Returns:
             str: The path to the downloaded file, None if the download fails.
         """
@@ -438,6 +465,7 @@ class KCWorksCorpusExtractor:
         self,
         record: dict,
         file_name: str,
+        page_num: int,
         extracted_text: str,
         failed: bool = False,
         supported: bool = True,
@@ -448,6 +476,8 @@ class KCWorksCorpusExtractor:
         Args:
             record (dict): The record from the API.
             file_name (str): The name of the file.
+            page_num (int): The page number. This will be 0 if the text is not
+                page-based. Currently used only for pdf files.
             extracted_text (str): The extracted text.
             failed (bool): Whether the extraction failed. Default is False.
             supported (bool): Whether the file is supported. Default is True.
@@ -478,16 +508,22 @@ class KCWorksCorpusExtractor:
             supported_value,
         ]
 
-    def extract_documents(self):
+    def extract_documents(self, max_docs: int = 0):
         """
         Access files from an API, download them, extract text, and log results.
+
+        Args:
+            max_docs (int, optional): Maximum number of documents to download.
+                0 is the default value, which means the "CORPUS_SIZE" config
+                value will be used.
         """
+        corpus_size = max_docs if max_docs else getattr(config, "CORPUS_SIZE", 100)
         try:
             extractor = DocumentExtractor()
             auth_headers = {"Authorization": f"Bearer {config.KCWORKS_API_KEY}"}
             page = 1
             has_more_pages = True
-            counter = 0
+            total_docs_extracted = 0
 
             output_csv_headers = [
                 "Record ID",
@@ -504,9 +540,10 @@ class KCWorksCorpusExtractor:
                 with open(
                     config.EXTRACTED_TEXT_CSV_PATH, "w", newline="", encoding="utf-8"
                 ) as file:
-                    csv.writer(file).writerow(output_csv_headers)
+                    # Using tab as delimiter since extracted text may contain commas and other special characters
+                    csv.writer(file, delimiter='\t').writerow(output_csv_headers)
 
-            while has_more_pages:
+            while has_more_pages and total_docs_extracted < corpus_size:
                 try:
                     response = requests.get(
                         f"{config.KCWORKS_API_URL}/{config.API_ENDPOINT}?"
@@ -522,8 +559,8 @@ class KCWorksCorpusExtractor:
 
                         files = record.get("files", {}).get("entries", {})
                         for file_name in files.keys():
-                            counter += 1
-                            logging.info(f"Processing file #{counter}: {file_name}")
+                            total_docs_extracted += 1
+                            logging.info(f"Processing file #{total_docs_extracted}: {file_name}")
 
                             local_file_path = os.path.join(
                                 config.DOWNLOADED_FILES_PATH, file_name
@@ -543,10 +580,12 @@ class KCWorksCorpusExtractor:
                                     newline="",
                                     encoding="utf-8",
                                 ) as file:
-                                    writer = csv.writer(file)
+                                    # Using tab as delimiter since extracted text may contain commas and other special characters
+                                    writer = csv.writer(file, delimiter='\t')
                                     writer.writerow(
                                         self._make_csv_row(
                                             record,
+                                            0,
                                             file_name,
                                             "[Download Failed]",
                                             failed=True,
@@ -569,7 +608,8 @@ class KCWorksCorpusExtractor:
                                     newline="",
                                     encoding="utf-8",
                                 ) as file:
-                                    writer = csv.writer(file)
+                                    # Using tab as delimiter since extracted text may contain commas and other special characters
+                                    writer = csv.writer(file, delimiter='\t')
                                     writer.writerow(
                                         self._make_csv_row(
                                             record,
@@ -587,13 +627,15 @@ class KCWorksCorpusExtractor:
                                 newline="",
                                 encoding="utf-8",
                             ) as file:
-                                writer = csv.writer(file)
+                                # Using tab as delimiter since extracted text may contain commas and other special characters
+                                writer = csv.writer(file, delimiter='\t')
                                 if isinstance(extracted_text, list):
                                     for chunk in extracted_text:
                                         writer.writerow(
                                             self._make_csv_row(
                                                 record,
                                                 file_name,
+                                                0,
                                                 chunk,
                                                 failed=failed,
                                                 supported=supported,
@@ -606,6 +648,7 @@ class KCWorksCorpusExtractor:
                                                 self._make_csv_row(
                                                     record,
                                                     file_name,
+                                                    page_num,
                                                     chunk,
                                                     failed=failed,
                                                     supported=supported,
@@ -616,6 +659,7 @@ class KCWorksCorpusExtractor:
                                         self._make_csv_row(
                                             record,
                                             file_name,
+                                            0,
                                             extracted_text,
                                             failed=failed,
                                             supported=supported,
@@ -658,16 +702,6 @@ class KCWorksCorpusExtractor:
 
 def main() -> None:
     """Download KCWorks record files and extract text."""
-    set_up_logging()
-    # download_tika_binary()
-    initVM()
-    print(tika_config.getParsers())
-    print(tika_config.getMimeTypes())
-    print(tika_config.getDetectors())
-    # Make sure the working directories exist
-    os.makedirs(config.DOWNLOADED_FILES_PATH, exist_ok=True)
-    os.makedirs(config.OUTPUT_FILES_PATH, exist_ok=True)
-
     KCWorksCorpusExtractor().extract_documents()
 
 
