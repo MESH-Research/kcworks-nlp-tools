@@ -3,6 +3,7 @@ pyproject.toml
 kcworks_nlp_tools/__init__.py
 kcworks_nlp_tools/config.py
 kcworks_nlp_tools/dependencies.py
+kcworks_nlp_tools/document_similarity_search.py
 kcworks_nlp_tools/kcworks_downloader.py
 kcworks_nlp_tools/logging_config.py
 kcworks_nlp_tools/text_extractor.py

@@ -6,6 +6,7 @@ Requires-Python: >=3.12
 Description-Content-Type: text/markdown
 Requires-Dist: docx>=0.2.4
 Requires-Dist: dotenv>=0.9.9
+Requires-Dist: faiss-cpu>=1.10.0
 Requires-Dist: pandas>=2.2.3
 Requires-Dist: psutil>=7.0.0
 Requires-Dist: pymupdf>=1.25.3
@@ -14,6 +15,7 @@ Requires-Dist: pytest>=8.3.5
 Requires-Dist: requests>=2.32.3
 Requires-Dist: tensorflow>=2.18.0
 Requires-Dist: tika>=2.6.0
+Requires-Dist: torch>=2.6.0
 Requires-Dist: transformers>=4.49.0
 
 # KCWorks NLP Tools

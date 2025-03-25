@@ -1,25 +1,19 @@
 import os
-from pprint import pformat
 import time
 import logging
 from traceback import format_exc
 import requests
 import fitz
-from pathlib import Path
 import pytesseract
 from PIL import Image
-
-# from docx import Document
-# import pptx
 import sys
 import csv
 from tika import language, parser, initVM
 from tika import config as tika_config
-
-# from .dependencies import download_tika_binary
 from kcworks_nlp_tools.logging_config import set_up_logging
 import kcworks_nlp_tools.config as config
-
+from pathlib import Path
+from datetime import datetime
 
 # Make sure large text field in csv can be processed
 csv.field_size_limit(sys.maxsize)
@@ -42,11 +36,17 @@ class DocumentExtractor:
         self.local_file_folder = config.DOWNLOADED_FILES_PATH
         self.output_file_folder = config.OUTPUT_FILES_PATH
         self.extracted_text_csv_path = config.EXTRACTED_TEXT_CSV_PATH
-        self.chunk_size = config.CHUNK_SIZE
+        self.chunk_size = int(config.CHUNK_SIZE)
+
+    def _clean_text(self, text: str) -> str:
+        """
+        Clean text by removing newlines, carriage returns, and tabs.
+        """
+        return text.replace("\n", "").replace("\r", "").replace("\t", "")
 
     def extract_file(
         self, local_file_path: str, file_name: str
-    ) -> tuple[str | None, bool, bool]:
+    ) -> list[tuple[str | None, int, bool, bool]]:
         """
         Extract text from a file based on its extension.
 
@@ -55,10 +55,10 @@ class DocumentExtractor:
             file_name (str): The name of the file.
 
         Returns:
-            A tuple containing:
-            - Extracted text (or None). If the file is a PDF, the text is a dictionary
-              whose keys are the page numbers and values are lists of strings, each
-              representing a chunk of text from that page.
+            A list of tuples, one per chunk, containing:
+            - Extracted text (or None).
+            - An integer indicating the page number on which the chunk was found,
+              or 0 if the file is not a PDF.
             - Flag indicating if extraction failed (True if failed, False otherwise)
             - Flag indicating if file is supported (True if supported, False otherwise)
         """
@@ -80,90 +80,95 @@ class DocumentExtractor:
                     f"Extracting {file_name} using {extraction_function.__name__}"
                 )
                 extracted_text = extraction_function(local_file_path)
-                if extracted_text:
-                    return (extracted_text, False, True)
+                if any(t for t in extracted_text if t[1]):
+                    return [(e[1], e[0], False, True) for e in extracted_text]
                 else:
-                    return (None, True, True)
+                    return [(None, 0, True, True)]
             except Exception as e:
                 logging.error(f"Error extracting {file_name} at {local_file_path}: {e}")
-                return (None, True, True)
+                return [(None, 0, True, False)]
         else:
             logging.warning(f"Unsupported file type for {file_name}. Skipping.")
-            return (None, True, False)
+            return [(None, 0, True, False)]
 
-    def extract_with_tika(self, file_path: str) -> list[str] | None:
+    def extract_with_tika(self, file_path: str) -> list[tuple[int, str]] | None:
         """
-        Extract text from a file using Tika.
+        Extract text from a file using Tika and chunk it appropriately for
+        transformer models.
 
-        Divides the text into chunks of a specified size. Strips the text of
-        newlines, carriage returns, and tabs. (We are expecting to store it in
-        a tab-delimited CSV file, so we need to strip the text of these
-        characters.)
-
-        # TODO: think about how to avoid losing semantic information when
-        # dividing sentences at chunk boundaries
+        The text is split into chunks that:
+        1. Don't cut words in the middle
+        2. Don't cut sentences in the middle
+        3. Are appropriate for transformer model input
 
         Args:
             file_path (str): The path to the file to extract text from.
 
         Returns:
-            list[str] | None: The extracted text divided into chunks as a list of strings, or None if the extraction fails.
+            list[tuple[int, str]] | None: The extracted text divided into chunks as
+            a list of tuples, where the first element is the page number and the
+            second element is the chunk of text. If no text is found, the second
+            element is None.
         """
         try:
             parsed = parser.from_file(file_path)
-            words = parsed.get("content").split()
-            text_chunks = [
-                " ".join(words[i : i + self.chunk_size]).replace('\n', '').replace('\r', '').replace('\t', '')
-                for i in range(0, len(words), self.chunk_size)
-            ]
-            return text_chunks
+            content = parsed.get("content")
+            if not content:
+                return None
+
+            # Split into sentences first
+            sentences = [s.strip() for s in content.split(".") if s.strip()]
+
+            chunks = []
+            current_chunk = []
+            current_length = 0
+
+            for sentence in sentences:
+                sentence_length = len(sentence.split())
+
+                # If adding this sentence would exceed chunk size, start a new chunk
+                if current_length + sentence_length > self.chunk_size:
+                    if current_chunk:  # Only add non-empty chunks
+                        # Add the page number to the chunk, even if we don't have it
+                        chunks.append((0, self._clean_text(" ".join(current_chunk))))
+                    current_chunk = [sentence]
+                    current_length = sentence_length
+                else:
+                    current_chunk.append(sentence)
+                    current_length += sentence_length
+
+            # Add the last chunk if it exists
+            if current_chunk:
+                chunks.append((0, self._clean_text(" ".join(current_chunk))))
+
+            return chunks
         except Exception as e:
             logging.error(f"Error extracting {file_path} with Tika: {e}")
             return None
 
-    def extract_text_from_pdf(self, pdf_file_path: str) -> dict[str, str | None] | None:
+    def extract_text_from_pdf(
+        self, pdf_file_path: str
+    ) -> list[tuple[int, str | None]] | None:
         """
-        Extract text from a PDF file.
-        Uses PyMuPDF/fitz for text-based PDFs and PyTesseract for image-based PDFs.
-        Divides the pages into chunks of a specified size when extracting text.
-        Strips the text of newlines, carriage returns, and tabs. (We are expecting
-        to store it in a tab-delimited CSV file, so we need to strip the text of
-        these characters.)
-
-        # TODO: think about how to avoid losing semantic information when
-        # dividing sentences at page and chunk boundaries
+        Extract text from a PDF file with improved multi-language support
+        and sentence-aware chunking.
 
         Args:
             pdf_file_path (str): The path to the PDF file.
-            chunk_size (int, optional): The number of words to include in each chunk
-            when dividing the pages into chunks.
 
         Returns:
-            A dictionary whose keys are the page numbers and values are the
-            extracted text.
+            list[tuple[int, str | None]] | None: The extracted text divided into chunks as a list of tuples, where the first element is the page number and the second element is the chunk of text. If no text is found, the second element is None.
         """
-        # Read PDF file
-        # FIXME: Alternative approach using Tika
-        # data = parser.from_file(filename, xmlContent=True)
-        # xhtml_data = BeautifulSoup(data['content'])
-        # for i, content in enumerate(xhtml_data.find_all('div', attrs={'class': 'page'})):
-        #     # Parse PDF data using TIKA (xml/html)
-        #     # It's faster and safer to create a new buffer than truncating it
-        #     # https://stackoverflow.com/questions/4330812/how-do-i-clear-a-stringio-object
-        #     _buffer = StringIO()
-        #     _buffer.write(str(content))
-        #     parsed_content = parser.from_buffer(_buffer.getvalue())
-
-        #     # Add pages
-        #     text = parsed_content['content'].strip()
-        #     pages_txt.append(text)
-
         try:
+            # First detect the language using Tika
+            language_code = language.from_file(pdf_file_path)
+            logging.info(f"Language code detected: {language_code}")
+
             with fitz.open(pdf_file_path) as doc:
                 total_pages = len(doc)
-                page_texts = {}
+                chunks = []
+
                 for page_num in range(total_pages):
-                    # Log every 10 pages or the last page
                     if (page_num + 1) % 10 == 0 or page_num == total_pages - 1:
                         logging.info(f"Processing page {page_num + 1} of {total_pages}")
 
@@ -171,15 +176,25 @@ class DocumentExtractor:
 
                     try:
                         page_text = page.get_text().strip()
-                        if page_text:  # If there is text, pdf likely text-based
+                        if page_text:  # Text-based PDF
                             logging.debug(f"Page {page_num + 1}: Text-based")
-                        else:  # This is probably image-based
+                        else:  # Image-based PDF
                             logging.debug(f"Page {page_num + 1}: Image-based")
                             pix = page.get_pixmap()
                             img = Image.frombytes(
                                 "RGB", [pix.width, pix.height], pix.samples
                             )
-                            page_text = pytesseract.image_to_string(img).strip()
+
+                            # Configure PyTesseract for the detected language
+                            if language_code:
+                                tesseract_lang = self._convert_language_code(
+                                    language_code
+                                )
+                                page_text = pytesseract.image_to_string(
+                                    img, lang=tesseract_lang
+                                ).strip()
+                            else:
+                                page_text = pytesseract.image_to_string(img).strip()
 
                             if len(page_text) < 10:
                                 logging.warning(
@@ -187,120 +202,79 @@ class DocumentExtractor:
                                     f"be incomplete: `{page_text}`"
                                 )
 
-                        chunks = []
-                        chunk_count = len(page_text) // self.chunk_size
-                        for i in range(chunk_count):
-                            chunk = page_text[
-                                i * self.chunk_size : (i + 1) * self.chunk_size
-                            ].replace('\n', '').replace('\r', '').replace('\t', '')
-                            chunks.append(chunk)
-                        page_texts[page_num + 1] = chunks
+                        # Split into sentences first
+                        sentences = [
+                            s.strip() for s in page_text.split(".") if s.strip()
+                        ]
+
+                        current_chunk = []
+                        current_length = 0
+
+                        for sentence in sentences:
+                            sentence_length = len(sentence.split())
+
+                            # If adding this sentence would exceed chunk size, start
+                            # a new chunk
+                            if current_length + sentence_length > self.chunk_size:
+                                if current_chunk:  # Only add non-empty chunks
+                                    chunks.append(
+                                        self._clean_text(" ".join(current_chunk))
+                                    )
+                                current_chunk = [sentence]
+                                current_length = sentence_length
+                            else:
+                                current_chunk.append(sentence)
+                                current_length += sentence_length
+
+                        # Add the last chunk if it exists
+                        if current_chunk:
+                            chunks.append(
+                                (
+                                    page_num + 1,
+                                    self._clean_text(" ".join(current_chunk)),
+                                )
+                            )
 
                     except Exception as page_error:
                         logging.error(
                             f"Error processing page {page_num + 1}: {page_error}"
                         )
-                        page_texts[page_num + 1] = [None]
+                        chunks.append((page_num + 1, None))
 
-                return page_texts
+                return chunks
 
         except Exception as e:
             logging.error(f"Error processing PDF {pdf_file_path}: {e}")
             return None
 
-    def extract_text_from_docx(self, docx_file_path: str) -> list[str] | None:
+    def _convert_language_code(self, tika_lang_code: str) -> str:
         """
-        Extract text from a .docx file.
-
-        Args:
-            docx_file_path (str): The path to the .docx file.
-
-        Returns:
-            list[str]: The extracted text divided into a list of strings, or None
-            if it fails.
+        Convert Tika language code to Tesseract language code format.
         """
-        try:
-            logging.info(f"Opening DOCX file: {docx_file_path}")
-            doc = Document(docx_file_path)
-            paragraphs = []
-
-            # Loop through each paragraph
-            for paragraph_num, paragraph in enumerate(doc.paragraphs, start=1):
-                # Check if the paragraph text contains unexpected
-                # formatting or artifacts
-                if paragraph.text.strip():
-                    clean_text = paragraph.text.strip()
-                    # TODO: python has library to take out markup instruction
-                    if (
-                        "<" in clean_text or ">" in clean_text
-                    ):  # Check for HTML or XML or markup
-                        logging.warning(
-                            f"Potential formatting instructions detected in "
-                            f"paragraph {paragraph_num}: {clean_text}"
-                        )
-                    paragraphs.append(clean_text)
-                else:
-                    logging.debug(
-                        f"Paragraph {paragraph_num} is empty and was skipped."
-                    )
-
-            extracted_text = "\n".join(paragraphs)
-            logging.info(
-                f"Successfully extracted text from {len(paragraphs)} paragraphs."
-            )
-            return extracted_text
-
-        except PermissionError as e:
-            logging.warning(f"Permission denied for {docx_file_path}: {e}")
-            return None
-
-        except Exception as e:
-            logging.error(f"Error extracting text from DOCX file {docx_file_path}: {e}")
-            return None
-
-    def extract_text_from_doc_with_tika(self, doc_file_path):
-        """
-        Extracts text from a .doc file using Apache Tika server.
-
-        Args:
-            doc_file_path (str): Path to the .doc file.
-
-        Returns:
-            str: Extracted text, or None if extraction fails.
-        """
-        try:
-            parsed = parser.from_file(doc_file_path)  # Send the file to Tika server
-            return parsed.get("content")  # Extract the content field (text)
-        except Exception as e:
-            print(f"Error extracting text from {doc_file_path}: {e}")
-            return None
-
-    def extract_text_from_ppt_with_tika(self, ppt_file_path):
-        """
-        Extract text from a .ppt file using Apache Tika.
-
-        Args:
-            ppt_file_path (str): The path to the .ppt file.
-
-        Returns:
-            str: Extracted text, or None if extraction fails.
-        """
-        try:
-            parsed = parser.from_file(ppt_file_path)
-            return parsed.get("content")
-        except Exception as e:
-            logging.error(f"Error extracting text from {ppt_file_path}: {e}")
-            return None
+        lang_mapping = {
+            "en": "eng",
+            "es": "spa",
+            "fr": "fra",
+            "de": "deu",
+            "it": "ita",
+            "pt": "por",
+            "ru": "rus",
+            "zh": "chi_sim",  # Simplified Chinese
+            "ja": "jpn",
+            "ko": "kor",
+            # Add more mappings as needed
+        }
+        return lang_mapping.get(tika_lang_code, "eng")  # Default to English if unknown
 
     def extract_text_from_txt(self, txt_file_path):
         """
-        Extract text from a plain txt file using Python's built-in open() function.
+        Extract text from a plain txt file and chunk it appropriately for transformer models.
 
         Args:
             txt_file_path (str): The path to the txt file.
 
         Returns:
-            str: The extracted text, or None if it fails.
+            list[str] | None: The extracted text divided into chunks as a list of strings, or None if it fails.
         """
         try:
             with open(txt_file_path, "r", encoding="utf-8") as file:
@@ -308,68 +282,36 @@ class DocumentExtractor:
 
             if not text.strip():
                 logging.warning(f"Warning: The file {txt_file_path} is empty.")
+                return None
 
-            return text
+            # Split into sentences first
+            sentences = [s.strip() for s in text.split(".") if s.strip()]
+
+            chunks = []
+            current_chunk = []
+            current_length = 0
+
+            for sentence in sentences:
+                sentence_length = len(sentence.split())
+
+                # If adding this sentence would exceed chunk size, start a new chunk
+                if current_length + sentence_length > self.chunk_size:
+                    if current_chunk:  # Only add non-empty chunks
+                        chunks.append(self._clean_text(" ".join(current_chunk)))
+                    current_chunk = [sentence]
+                    current_length = sentence_length
+                else:
+                    current_chunk.append(sentence)
+                    current_length += sentence_length
+
+            # Add the last chunk if it exists
+            if current_chunk:
+                chunks.append(self._clean_text(" ".join(current_chunk)))
+
+            return chunks
+
         except Exception as e:
             logging.error(f"Error extracting text from TXT file: {e}")
-            return None
-
-    def extract_text_from_pptx(
-        self,
-        pptx_file_path,
-    ):  # TODO: .ppt not supported, check tika and how to integrate
-        """
-        Extract text from a PowerPoint file, including slide text, speaker notes,
-        and tables.
-
-        Args:
-            pptx_file_path (str): The path to the PowerPoint file.
-
-        Returns:
-            str: The extracted text, or None if it fails.
-        """
-        try:
-            logging.info(f"Opening PowerPoint file: {pptx_file_path}")
-            presentation = pptx.Presentation(pptx_file_path)
-            all_slides_text = []
-
-            for slide_num, slide in enumerate(presentation.slides, start=1):
-                slide_text = []
-
-                for shape in slide.shapes:
-                    # Extract text from text-containing shapes
-                    if hasattr(shape, "text") and shape.text.strip():
-                        slide_text.append(shape.text.strip())
-
-                    # Extract text from table
-                    if shape.shape_type == 19:  # Type 19 matches to a table
-                        for row in shape.table.rows:
-                            for cell in row.cells:
-                                cell_text = cell.text.strip()
-                                if cell_text:
-                                    slide_text.append(cell_text)
-
-                if slide.has_notes_slide and slide.notes_slide.notes_text_frame:
-                    notes = slide.notes_slide.notes_text_frame.text.strip()
-                    if notes:
-                        slide_text.append(f"Speaker Notes: {notes}")
-
-                logging.info(f"Processed slide {slide_num}/{len(presentation.slides)}")
-
-                if slide_text:
-                    # Combine slide content with headers
-                    all_slides_text.append(
-                        f"--- Slide {slide_num} ---\n" + "\n".join(slide_text)
-                    )
-                else:
-                    logging.warning(f"Slide {slide_num} contains no extractable text.")
-
-            return "\n\n".join(all_slides_text)
-
-        except Exception as e:
-            logging.error(
-                f"Error extracting text from PowerPoint file {pptx_file_path}: {e}"
-            )
             return None
 
 
@@ -378,8 +320,9 @@ class KCWorksCorpusExtractor:
     Access files from an API, download them, extract text, and log results.
     """
 
-    def __init__(self, config=config):
+    def __init__(self, config=config, use_unique_filenames=True):
         self.config = config
+        self.use_unique_filenames = use_unique_filenames
 
         set_up_logging()
         # download_tika_binary()
@@ -390,6 +333,29 @@ class KCWorksCorpusExtractor:
         # Make sure the working directories exist
         os.makedirs(config.DOWNLOADED_FILES_PATH, exist_ok=True)
         os.makedirs(config.OUTPUT_FILES_PATH, exist_ok=True)
+
+    def _get_output_path(self) -> Path:
+        """
+        Get the output file path, either using the base config path or generating
+        a unique filename with date and counter.
+
+        Returns:
+            Path: The path to use for the output file
+        """
+        if not self.use_unique_filenames:
+            return Path(self.config.EXTRACTED_TEXT_CSV_PATH)
+
+        base_path = Path(self.config.EXTRACTED_TEXT_CSV_PATH)
+        date_str = datetime.now().strftime("%Y%m%d")
+        counter = 1
+        while True:
+            output_path = (
+                base_path.parent
+                / f"{base_path.stem}_{date_str}_{counter:03d}{base_path.suffix}"
+            )
+            if not output_path.exists():
+                return output_path
+            counter += 1
 
     def download_file(
         self,
@@ -466,7 +432,7 @@ class KCWorksCorpusExtractor:
         record: dict,
         file_name: str,
         page_num: int,
-        extracted_text: str,
+        extracted_text: str | None,
         failed: bool = False,
         supported: bool = True,
     ):
@@ -519,6 +485,8 @@ class KCWorksCorpusExtractor:
         """
         corpus_size = max_docs if max_docs else getattr(config, "CORPUS_SIZE", 100)
         try:
+            output_path = self._get_output_path()
+            logging.info(f"Starting extraction. Output will be saved to: {output_path}")
             extractor = DocumentExtractor()
             auth_headers = {"Authorization": f"Bearer {config.KCWORKS_API_KEY}"}
             page = 1
@@ -537,11 +505,10 @@ class KCWorksCorpusExtractor:
 
             # Create the CSV file and write headers if it's the first page
             if page == 1:
-                with open(
-                    config.EXTRACTED_TEXT_CSV_PATH, "w", newline="", encoding="utf-8"
-                ) as file:
-                    # Using tab as delimiter since extracted text may contain commas and other special characters
-                    csv.writer(file, delimiter='\t').writerow(output_csv_headers)
+                with open(output_path, "w", newline="", encoding="utf-8") as file:
+                    # Using tab as delimiter since extracted text may contain commas
+                    # and other special characters
+                    csv.writer(file, delimiter="\t").writerow(output_csv_headers)
 
             while has_more_pages and total_docs_extracted < corpus_size:
                 try:
@@ -560,7 +527,9 @@ class KCWorksCorpusExtractor:
                         files = record.get("files", {}).get("entries", {})
                         for file_name in files.keys():
                             total_docs_extracted += 1
-                            logging.info(f"Processing file #{total_docs_extracted}: {file_name}")
+                            logging.info(
+                                f"Processing file #{total_docs_extracted}: {file_name}"
+                            )
 
                             local_file_path = os.path.join(
                                 config.DOWNLOADED_FILES_PATH, file_name
@@ -575,13 +544,11 @@ class KCWorksCorpusExtractor:
                                     f"for record {record['id']}."
                                 )
                                 with open(
-                                    config.EXTRACTED_TEXT_CSV_PATH,
-                                    "a",
-                                    newline="",
-                                    encoding="utf-8",
+                                    output_path, "a", newline="", encoding="utf-8"
                                 ) as file:
-                                    # Using tab as delimiter since extracted text may contain commas and other special characters
-                                    writer = csv.writer(file, delimiter='\t')
+                                    # Using tab as delimiter since extracted text may contain commas
+                                    # and other special characters
+                                    writer = csv.writer(file, delimiter="\t")
                                     writer.writerow(
                                         self._make_csv_row(
                                             record,
@@ -594,8 +561,8 @@ class KCWorksCorpusExtractor:
                                 continue
 
                             try:
-                                extracted_text, failed, supported = (
-                                    extractor.extract_file(local_file_path, file_name)
+                                extracted_text = extractor.extract_file(
+                                    local_file_path, file_name
                                 )
                             except Exception as e:
                                 logging.error(
@@ -603,17 +570,16 @@ class KCWorksCorpusExtractor:
                                     f"for record {record['id']}: {format_exc(e)}."
                                 )
                                 with open(
-                                    config.EXTRACTED_TEXT_CSV_PATH,
-                                    "a",
-                                    newline="",
-                                    encoding="utf-8",
+                                    output_path, "a", newline="", encoding="utf-8"
                                 ) as file:
-                                    # Using tab as delimiter since extracted text may contain commas and other special characters
-                                    writer = csv.writer(file, delimiter='\t')
+                                    # Using tab as delimiter since extracted text may contain commas
+                                    # and other special characters
+                                    writer = csv.writer(file, delimiter="\t")
                                     writer.writerow(
                                         self._make_csv_row(
                                             record,
                                             file_name,
+                                            0,
                                             "[Processing Error]",
                                             failed=True,
                                         )
@@ -622,52 +588,28 @@ class KCWorksCorpusExtractor:
 
                             # Append results to the output CSV
                             with open(
-                                config.EXTRACTED_TEXT_CSV_PATH,
-                                "a",
-                                newline="",
-                                encoding="utf-8",
+                                output_path, "a", newline="", encoding="utf-8"
                             ) as file:
-                                # Using tab as delimiter since extracted text may contain commas and other special characters
-                                writer = csv.writer(file, delimiter='\t')
+                                # Using tab as delimiter since extracted text may contain commas
+                                # and other special characters
+                                writer = csv.writer(file, delimiter="\t")
                                 if isinstance(extracted_text, list):
                                     for chunk in extracted_text:
                                         writer.writerow(
                                             self._make_csv_row(
                                                 record,
                                                 file_name,
-                                                0,
-                                                chunk,
-                                                failed=failed,
-                                                supported=supported,
+                                                chunk[1],
+                                                chunk[0],
+                                                failed=chunk[2],
+                                                supported=chunk[3],
                                             )
                                         )
-                                elif isinstance(extracted_text, dict):
-                                    for page_num, chunks in extracted_text.items():
-                                        for chunk in chunks:
-                                            writer.writerow(
-                                                self._make_csv_row(
-                                                    record,
-                                                    file_name,
-                                                    page_num,
-                                                    chunk,
-                                                    failed=failed,
-                                                    supported=supported,
-                                                )
-                                            )
-                                else:
-                                    writer.writerow(
-                                        self._make_csv_row(
-                                            record,
-                                            file_name,
-                                            0,
-                                            extracted_text,
-                                            failed=failed,
-                                            supported=supported,
-                                        )
-                                    )
 
                             # If successfully processed, delete the file
-                            if not failed:
+                            if extracted_text and not any(
+                                chunk for chunk in extracted_text if chunk and chunk[2]
+                            ):
                                 os.remove(local_file_path)
                                 logging.info(f"Deleted local file: {file_name}")
                             else:
