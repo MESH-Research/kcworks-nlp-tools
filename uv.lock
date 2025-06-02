@@ -68,6 +68,18 @@ wheels = [
 ]
 
 [[package]]
+name = "click"
+version = "8.2.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/60/6c/8ca2efa64cf75a977a0d7fac081354553ebe483345c734fb6b6515d96bbc/click-8.2.1.tar.gz", hash = "sha256:27c491cc05d968d271d5a1db13e3b5a184636d9d930f148c50b038f0d0646202", size = 286342 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/85/32/10bb5764d90a8eee674e9dc6f4db6a0ab47c8c4d0d83c27f7c39ac415a4d/click-8.2.1-py3-none-any.whl", hash = "sha256:61a3265b914e850b85317d0b3109c7f8cd35a670f963866005d6ef1d5175a12b", size = 102215 },
+]
+
+[[package]]
 name = "colorama"
 version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -251,6 +263,18 @@ wheels = [
 ]
 
 [[package]]
+name = "invenio-subjects-fast"
+version = "2023.7.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "click" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/08/8e/b50606bb6e7e5a715367479834b245de5da6cd11f731a8ab314c910e71e5/invenio-subjects-fast-2023.7.5.tar.gz", hash = "sha256:ae8e37e7138b13954b0236c17e148bac029425d4b4affe1a1e01277deeb0487d", size = 32152677 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/19/bb/61561fbfd8070d6783fa758e633e4c08a2ec4103e9d3fc53d3a7adaa1405/invenio_subjects_fast-2023.7.5-py2.py3-none-any.whl", hash = "sha256:b725cf430bcc806c4516be95e4c76b33385a1c1a8aa1d06c8fbf3feb43643be3", size = 33178841 },
+]
+
+[[package]]
 name = "jinja2"
 version = "3.1.6"
 source = { registry = "https://pypi.org/simple" }
@@ -270,6 +294,7 @@ dependencies = [
     { name = "docx" },
     { name = "dotenv" },
     { name = "faiss-cpu" },
+    { name = "invenio-subjects-fast" },
     { name = "pandas" },
     { name = "psutil" },
     { name = "pymupdf" },
@@ -292,6 +317,7 @@ requires-dist = [
     { name = "docx", specifier = ">=0.2.4" },
     { name = "dotenv", specifier = ">=0.9.9" },
     { name = "faiss-cpu", specifier = ">=1.10.0" },
+    { name = "invenio-subjects-fast" },
     { name = "pandas", specifier = ">=2.2.3" },
     { name = "psutil", specifier = ">=7.0.0" },
     { name = "pymupdf", specifier = ">=1.25.3" },
