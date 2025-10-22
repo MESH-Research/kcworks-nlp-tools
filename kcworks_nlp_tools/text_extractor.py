@@ -7,7 +7,7 @@ import pandas as pd
 import logging
 import psutil
 from dotenv import load_dotenv
-from .logging_config import set_up_logging
+from logging_config import set_up_logging
 # from memory_profiler import profile
 
 
@@ -56,24 +56,24 @@ def filter_and_process_batch(df):
     log_memory_usage("Before filtering and processing batch.")
 
     # Filter for English language and files are processed
-    df = df[(df['Languages'] == 'eng') & (df['Failed'] == 0)]
+    df = df[(df["Languages"] == "eng") & (df["Failed"] == 0)]
     logging.info(
         f"Filtering English rows and successfully extracted text "
         f"from batch of size {len(df)}."
     )
 
     # Minimal cleaning
-    df['Processed Text'] = df['Extracted Text'].apply(clean_text)
+    df["Processed Text"] = df["Extracted Text"].apply(clean_text)
 
     # Drop the unnecessary column 'Extracted Text'
     columns_to_keep = [
-        'Record ID',
-        'Languages',
-        'DOI',
-        'File Name',
-        'Processed Text',
-        'Failed',
-        'Supported'
+        "Record ID",
+        "Languages",
+        "DOI",
+        "File Name",
+        "Processed Text",
+        "Failed",
+        "Supported",
     ]
     processed_df = df[columns_to_keep]
 
@@ -83,7 +83,7 @@ def filter_and_process_batch(df):
     return processed_df
 
 
-#TODO: maybe thinking about creating another DataFrame that keeps all the files for future use?
+# TODO: maybe thinking about creating another DataFrame that keeps all the files for future use?
 def process_csv_in_batches(input_filepath, output_filepath, batch_size=100):
     """
     Process a large CSV file in batches with minimal preprocessing.
@@ -94,7 +94,11 @@ def process_csv_in_batches(input_filepath, output_filepath, batch_size=100):
         batch_size(int): Number of rows per batch.
     """
     chunk_number = 0
-    cumulative_count = 0 # Track total processed rows
+    cumulative_count = 0  # Track total processed rows
+
+    logging.info(f"Input file path: {input_filepath}")
+    logging.info(f"output file path: {output_filepath}")
+    logging.info(f"Starting processing csv with batch size: {batch_size}")
 
     try:
         for chunk in pd.read_csv(input_filepath, chunksize=batch_size):
@@ -109,8 +113,9 @@ def process_csv_in_batches(input_filepath, output_filepath, batch_size=100):
             if chunk_number == 1:
                 processed_chunk.to_csv(output_filepath, index=False)
             else:
-                processed_chunk.to_csv(output_filepath, index=False,
-                                       mode='a', header=False)
+                processed_chunk.to_csv(
+                    output_filepath, index=False, mode="a", header=False
+                )
 
             logging.info(
                 f"Processed {batch_count} rows in batch {chunk_number}. "
@@ -128,8 +133,7 @@ def process_csv_in_batches(input_filepath, output_filepath, batch_size=100):
 
 
 def main():
-    """Download record files and extract text into csv for NLP uses
-    """
+    """Download record files and extract text into csv for NLP uses"""
     # Load environment variables
     load_dotenv()
 
@@ -153,3 +157,4 @@ def main():
 if __name__ == "__main__":
     set_up_logging()
     main()
+

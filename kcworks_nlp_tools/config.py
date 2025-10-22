@@ -20,3 +20,6 @@ KCWORKS_API_KEY = os.getenv("KCWORKS_API_KEY")
 KCWORKS_API_URL = os.getenv("KCWORKS_API_URL", "https://works.hcommons.org/api")
 LOGS_PATH = Path(current_dir) / "logs"
 PREPROCESSED_PATH = Path(OUTPUT_FILES_PATH) / "preprocessed.csv"
+TIKA_LOG_PATH = LOGS_PATH
+TIKA_PATH = Path(current_dir) / "lib"
+TIKA_LOG_FILE = "tika.log"

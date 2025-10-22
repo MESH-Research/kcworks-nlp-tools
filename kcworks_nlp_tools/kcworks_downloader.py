@@ -1,19 +1,22 @@
-import os
-import time
+import csv
 import logging
+import os
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
 from traceback import format_exc
-import requests
+
 import fitz
 import pytesseract
+import requests
 from PIL import Image
-import sys
-import csv
-from tika import language, parser, initVM
 from tika import config as tika_config
-from kcworks_nlp_tools.logging_config import set_up_logging
+from tika import initVM, language, parser
+
 import kcworks_nlp_tools.config as config
-from pathlib import Path
-from datetime import datetime
+from kcworks_nlp_tools.dependencies import download_tika_binary
+from kcworks_nlp_tools.logging_config import set_up_logging
 
 # Make sure large text field in csv can be processed
 csv.field_size_limit(sys.maxsize)
@@ -229,12 +232,10 @@ class DocumentExtractor:
 
                         # Add the last chunk if it exists
                         if current_chunk:
-                            chunks.append(
-                                (
-                                    page_num + 1,
-                                    self._clean_text(" ".join(current_chunk)),
-                                )
-                            )
+                            chunks.append((
+                                page_num + 1,
+                                self._clean_text(" ".join(current_chunk)),
+                            ))
 
                     except Exception as page_error:
                         logging.error(
@@ -457,9 +458,9 @@ class KCWorksCorpusExtractor:
         """
         record_id = record["id"]
         doi = record.get("pids", {}).get("doi", {}).get("identifier", "N/A")
-        languages = ",".join(
-            [lang["id"] for lang in record["metadata"].get("languages", [])]
-        )
+        languages = ",".join([
+            lang["id"] for lang in record["metadata"].get("languages", [])
+        ])
         if extracted_text is None:
             extracted_text = "[Error: Extraction Failed]"
         failed_value = 1 if failed else 0
