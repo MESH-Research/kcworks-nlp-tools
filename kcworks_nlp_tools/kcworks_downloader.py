@@ -1,10 +1,13 @@
+import argparse
 import csv
+import json
 import logging
 import os
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from pprint import pformat
 from traceback import format_exc
 
 import fitz
@@ -15,8 +18,11 @@ from tika import config as tika_config
 from tika import initVM, language, parser
 
 import kcworks_nlp_tools.config as config
-from kcworks_nlp_tools.dependencies import download_tika_binary
+
+# from kcworks_nlp_tools.dependencies import download_tika_binary
+from kcworks_nlp_tools.database.db import get_db
 from kcworks_nlp_tools.logging_config import set_up_logging
+from kcworks_nlp_tools.models import TextExtract
 
 # Make sure large text field in csv can be processed
 csv.field_size_limit(sys.maxsize)
@@ -67,8 +73,6 @@ class DocumentExtractor:
             - Flag indicating if file is supported (True if supported, False otherwise)
         """
         logging.info(f"Extracting text from {file_name}")
-        logging.info(f"Local file path: {local_file_path}")
-        logging.info(os.getenv("TIKA_SERVER_URL"))
 
         file_extension = os.path.splitext(file_name)[1].lower()
         language_code = language.from_file(local_file_path)
@@ -322,19 +326,26 @@ class KCWorksCorpusExtractor:
     Access files from an API, download them, extract text, and log results.
     """
 
-    def __init__(self, config=config, use_unique_filenames=True):
+    def __init__(
+        self,
+        config: object = config,
+        use_unique_filenames: bool = True,
+        storage: str = "db",
+    ):
         self.config = config
         self.use_unique_filenames = use_unique_filenames
 
         set_up_logging()
         # download_tika_binary()
         initVM()
-        print(tika_config.getParsers())
-        print(tika_config.getMimeTypes())
-        print(tika_config.getDetectors())
+        # print(tika_config.getParsers())
+        # print(tika_config.getMimeTypes())
+        # print(tika_config.getDetectors())
         # Make sure the working directories exist
         os.makedirs(self.config.DOWNLOADED_FILES_PATH, exist_ok=True)
         os.makedirs(self.config.OUTPUT_FILES_PATH, exist_ok=True)
+        self.failed_downloads = []
+        self.storage = storage
 
     def _get_output_path(self) -> Path:
         """
@@ -433,10 +444,14 @@ class KCWorksCorpusExtractor:
         self,
         record: dict,
         file_name: str,
-        page_num: int,
-        extracted_text: str | None,
+        file_hash: str | None = None,
+        file_type: str | None = None,
+        page_num: int = 0,
+        overlap: int = 0,
+        extracted_text: str | None = None,
         failed: bool = False,
         supported: bool = True,
+        error_msg: str = "",
     ):
         """
         Make a CSV row for the extracted text.
@@ -444,14 +459,20 @@ class KCWorksCorpusExtractor:
         Args:
             record (dict): The record from the API.
             file_name (str): The name of the file.
+            file_hash (str): The file hash.
+            file_type (str): The file type.
             page_num (int): The page number. This will be 0 if the text is not
                 page-based. Currently used only for pdf files.
+            overlap (int): The amount of overlap (in characters) between the 
+                current extract and any neighbours. Defaults to 0.
             extracted_text (str): The extracted text.
             failed (bool): Whether the extraction failed. Default is False.
             supported (bool): Whether the file is supported. Default is True.
+            error_msg (str): Any error mesage. Defaults to an empty string.
 
         Column headers:
-            Record ID, DOI, Languages, File Name, Extracted Text, Failed, Supported
+            DOI, Record ID, File Name, File Type, File Hash, Languages, Page, 
+            Overlap, Failed, Supported, Extracted Text, Error Message
 
         Returns:
             list: A list of the CSV row.
@@ -462,21 +483,150 @@ class KCWorksCorpusExtractor:
             lang["id"] for lang in record["metadata"].get("languages", [])
         ])
         if extracted_text is None:
-            extracted_text = "[Error: Extraction Failed]"
+            extracted_text = "[Error: Extraction failed]"
         failed_value = 1 if failed else 0
         supported_value = 1 if supported else 0
 
         return [
-            record_id,
             doi,
-            languages,
+            record_id,
             file_name,
-            extracted_text,
+            file_type,
+            file_hash,
+            languages,
+            page,
+            overlap,
             failed_value,
             supported_value,
+            extracted_text,
+            error_msg,
         ]
 
-    def extract_documents(self, max_docs: int = 0):
+    def _write_to_csv(
+        self,
+        record: dict,
+        file_name: str,
+        extracted_text: str,
+        page_num: int,
+        file_type: str,
+        file_hash: str | None = None,
+        overlap: int | None = None,
+        supported=True,
+        failed=False,
+        msg: str | None = None,
+    ) -> None:
+        """Write a csv row."""
+
+        output_path = self._get_output_path()
+
+        output_csv_headers = [
+            "DOI",
+            "Record ID",
+            "File Name",
+            "File Hash",
+            "Languages",
+            "File Type",
+            "Page",
+            "Overlap",
+            "Supported",
+            "Failed",
+            "Extracted Text",
+            "Error Message",
+        ]
+
+        if not Path(output_path).is_file():
+            logging.info(f"Creating CSV file in {output_path}")
+            try:
+                with open(output_path, "w", newline="", encoding="utf-8") as file:
+                    # Using tab as delimiter since extracted text may contain commas
+                    # and other special characters
+                    csv.writer(file, delimiter="\t").writerow(output_csv_headers)
+                logging.info("Successfully created CSV file")
+            except Exception as e:
+                logging.error(f"Error creating CSV file: {e}")
+                raise
+
+        if failed and not supported:
+            with open(output_path, "a", newline="", encoding="utf-8") as file:
+                writer = csv.writer(file, delimiter="\t")
+                writer.writerow(
+                    self._make_csv_row(
+                        record,
+                        file_name,
+                        file_hash,
+                        file_type,
+                        page_num,
+                        overlap,
+                        "[Download Failed]",
+                        failed=True,
+                        supported=False,
+                        error_msg=error_msg,
+                    )
+                )
+                self.failed_downloads.append({
+                    "record": record["id"],
+                    "file": file_name,
+                })
+
+    def _write_to_db(
+        self,
+        record: dict,
+        file_name: str,
+        extracted_text: str,
+        page_num: int,
+        file_type: str,
+        file_hash: str | None = None,
+        overlap: int | None = None,
+        supported: bool = True,
+        failed: bool = False,
+        msg: str | None = None,
+    ) -> None:
+        """Write a db row for one extracted text section."""
+
+        record_id = record["id"]
+        doi = record.get("pids", {}).get("doi", {}).get("identifier", "N/A")
+        languages = json.dumps([
+            lang["id"] for lang in record["metadata"].get("languages", [])
+        ])
+        if extracted_text is None and msg is None:
+            msg = "[Error: Extraction failed]"
+
+        with get_db() as db:
+            db.add(TextExtract(
+                doi=doi,
+                record_id=record_id,
+                filename=file_name,
+                file_hash=file_hash,
+                languages=languages,
+                file_type=file_type,
+                page=page_num,
+                overlap=overlap,
+                extracted=extracted_text or msg,
+                supported=supported,
+                failed=failed,
+                error_message=msg,
+            ))
+
+    def write_to_storage(self, *args, **kwargs) -> None:
+        """Write an item to configured storage type.
+
+        Provides a generic interface to multiple storage methods.
+        """
+
+        if self.storage == "csv":
+            return self._write_to_csv(*args, **kwargs)
+        elif self.storage == "db":
+            return self._write_to_db(*args, **kwargs)
+        else:
+            raise RuntimeError("No storage type configured.")
+
+    def extract_documents(
+        self,
+        max_docs: int = 0,
+        verbose: bool = False,
+        overwrite: bool = False,
+        chunk_size: int = 500,
+    ):
         """
         Access files from an API, download them, extract text, and log results.
 
@@ -484,47 +634,27 @@ class KCWorksCorpusExtractor:
             max_docs (int, optional): Maximum number of documents to download.
                 0 is the default value, which means the "CORPUS_SIZE" config
                 value will be used.
+            verbose (bool): Whether to print verbose output. Default is False.
+            overwrite (bool): Whether to overwrite the already-extracted text chunks
+                if they already exist.
         """
         corpus_size = max_docs if max_docs else getattr(self.config, "CORPUS_SIZE", 100)
+
         try:
-            output_path = self._get_output_path()
-            logging.info(f"Starting extraction. Output will be saved to: {output_path}")
+            logging.info("Starting extraction")
             extractor = DocumentExtractor(config=self.config)
             auth_headers = {"Authorization": f"Bearer {self.config.KCWORKS_API_KEY}"}
             page = 1
             has_more_pages = True
-            total_docs_extracted = 0
+            total_docs_processed = 0
+            total_chunks_processed = 0
+            total_docs_succeeded = 0
+            total_chunks_succeeded = 0
+            docs_with_errors = []
+            failed_downloads = []
 
-            output_csv_headers = [
-                "Record ID",
-                "DOI",
-                "Languages",
-                "File Name",
-                "Extracted Text",
-                "Failed",
-                "Supported",
-            ]
-
-            # Create the CSV file and write headers if it's the first page
-            if page == 1:
-                logging.info("Creating CSV file with headers")
+            while has_more_pages and total_docs_processed < corpus_size:
                 try:
-                    with open(output_path, "w", newline="", encoding="utf-8") as file:
-                        # Using tab as delimiter since extracted text may contain commas
-                        # and other special characters
-                        csv.writer(file, delimiter="\t").writerow(output_csv_headers)
-                    logging.info("Successfully created CSV file")
-                except Exception as e:
-                    logging.error(f"Error creating CSV file: {e}")
-                    raise
-
-            logging.info(
-                f"About to enter while loop with page={page}, has_more_pages={has_more_pages}, corpus_size={corpus_size}"
-            )
-            while has_more_pages and total_docs_extracted < corpus_size:
-                logging.info(f"Inside while loop, page={page}")
-                try:
-                    logging.info(f"Making API request for page {page}")
                     response = requests.get(
                         f"{self.config.KCWORKS_API_URL}/{self.config.API_ENDPOINT}?"
                         f"size={self.config.BATCH_SIZE}&page={page}",
@@ -532,7 +662,6 @@ class KCWorksCorpusExtractor:
                     )
                     response.raise_for_status()  # for non-200 responses
                     data = response.json()
-                    logging.info(f"Got API response: {data}")
 
                     # Process each record on the current page
                     for record in data.get("hits", {}).get("hits", []):
@@ -540,9 +669,11 @@ class KCWorksCorpusExtractor:
 
                         files = record.get("files", {}).get("entries", {})
                         for file_name in files.keys():
-                            total_docs_extracted += 1
+                            file_type = files[file_name].get("ext")
+                            file_hash = files[file_name].get("checksum")
+                            total_docs_processed += 1
                             logging.info(
-                                f"Processing file #{total_docs_extracted}: {file_name}"
+                                f"Processing file #{total_docs_processed}: {file_name}"
                             )
 
                             local_file_path = os.path.join(
@@ -557,71 +688,85 @@ class KCWorksCorpusExtractor:
                                     f"Failed downloading {file_name} "
                                     f"for record {record['id']}."
                                 )
-                                with open(
-                                    output_path, "a", newline="", encoding="utf-8"
-                                ) as file:
-                                    # Using tab as delimiter since extracted text
-                                    # may contain commas
-                                    # and other special characters
-                                    writer = csv.writer(file, delimiter="\t")
-                                    writer.writerow(
-                                        self._make_csv_row(
-                                            record,
-                                            file_name,
-                                            0,
-                                            "[Download Failed]",
-                                            failed=True,
-                                        )
-                                    )
+                                self.write_to_storage(
+                                    record, 
+                                    file_name, 
+                                    extracted_text=None, 
+                                    page_num=0,
+                                    file_type=file_type,
+                                    file_hash=None,
+                                    overlap=0,
+                                    supported=False, 
+                                    failed=True, 
+                                    msg="[Error: Download failed]"
+                                )
                                 continue
 
                             try:
                                 extracted_text = extractor.extract_file(
                                     local_file_path, file_name
                                 )
+                                chunks_succeeded = 0
+                                chunks_failed = 0
+                                chunks_unsupported = 0
+                                for txt, pg, failed, supported in extracted_text:
+                                    total_chunks_processed += 1
+                                    if supported and not failed:
+                                        chunks_succeeded += 1
+                                    elif not supported:
+                                        chunks_failed += 1
+                                        chunks_unsupported += 1
+                                    elif failed:
+                                        chunks_failed += 1
+                                if chunks_failed == chunks_unsupported == 0:
+                                    total_chunks_succeeded += chunks_succeeded
+                                    total_docs_succeeded += 1
+                                else:
+                                    docs_with_errors.append({
+                                        "record": record["id"],
+                                        "file": file_name,
+                                        "chunks_succeeded": chunks_succeeded,
+                                        "chunks_failed": chunks_failed,
+                                        "chunks_unsupported": chunks_unsupported,
+                                    })
+
                             except Exception as e:
                                 logging.error(
                                     f"Error extracting file {file_name} "
                                     f"for record {record['id']}: {format_exc(e)}."
                                 )
-                                with open(
-                                    output_path, "a", newline="", encoding="utf-8"
-                                ) as file:
-                                    # Using tab as delimiter since extracted text
-                                    # may contain commas
-                                    # and other special characters
-                                    writer = csv.writer(file, delimiter="\t")
-                                    writer.writerow(
-                                        self._make_csv_row(
-                                            record,
-                                            file_name,
-                                            0,
-                                            "[Processing Error]",
-                                            failed=True,
-                                        )
-                                    )
+                                self.write_to_storage(
+                                    record, 
+                                    file_name, 
+                                    extracted_text=None, 
+                                    page_num=0,
+                                    file_type=file_type,
+                                    file_hash=file_hash,
+                                    overlap=0,
+                                    supported=False, 
+                                    failed=True, 
+                                    msg="[Processing error during extraction]"
+                                )
+                                docs_with_errors.append({
+                                    "record": record["id"],
+                                    "file": file_name,
+                                })
                                 continue
 
-                            # Append results to the output CSV
-                            with open(
-                                output_path, "a", newline="", encoding="utf-8"
-                            ) as file:
-                                # Using tab as delimiter since extracted text
-                                # may contain commas
-                                # and other special characters
-                                writer = csv.writer(file, delimiter="\t")
-                                if isinstance(extracted_text, list):
-                                    for chunk in extracted_text:
-                                        writer.writerow(
-                                            self._make_csv_row(
-                                                record,
-                                                file_name,
-                                                chunk[1],
-                                                chunk[0],
-                                                failed=chunk[2],
-                                                supported=chunk[3],
-                                            )
-                                        )
+                            # Append results to the output storage
+                            for chunk in extracted_text if chunk and not chunk[2]:
+                                self.write_to_storage(
+                                    record,
+                                    file_name,
+                                    extracted_text=chunk[1],
+                                    page_num=chunk[0],
+                                    file_type=file_type,
+                                    file_hash=file_hash,
+                                    overlap=0,  # FIXME: Get this value
+                                    supported=chunk[3],
+                                    failed=chunk[2],
+                                    msg="",
+                                )
 
                             # If successfully processed, delete the file
                             if extracted_text and not any(
@@ -655,14 +800,82 @@ class KCWorksCorpusExtractor:
                 except Exception as e:
                     logging.error(f"An error occurred: {e}")
 
+            logging.info("===================================================")
+            logging.info("Finished processing")
+            logging.info("===================================================")
+            logging.info(f"attempted corpus size: {corpus_size}")
+            logging.info(f"documents processed: {total_docs_processed}")
+            logging.info(f"    chunks processed: {total_chunks_processed}")
+            logging.info(f"documents succeeded: {total_docs_succeeded}")
+            logging.info(f"    chunks succeeded: {total_chunks_succeeded}")
+            logging.info(f"documents with errors: {len(docs_with_errors)}")
+            logging.info(
+                f"    chunks succeeded: {total_chunks_processed - total_chunks_succeeded}"
+            )
+            logging.info(f"downloads failed: {len(failed_downloads)}")
+            if verbose:
+                logging.info("===================================================")
+                logging.info(f"documents with errors:\n{pformat(docs_with_errors)}")
+                logging.info("===================================================")
+                logging.info(f"failed downloads:\n{pformat(failed_downloads)}")
+
         finally:
+            logging.info("===================================================")
             logging.info("Processing complete.")
+            logging.info("===================================================")
 
 
-def main() -> None:
+def main(
+    verbose: bool = False,
+    corpus_size: int = 10,
+    overwrite: bool = False,
+    chunk_size: int = 500,
+) -> None:
     """Download KCWorks record files and extract text."""
-    KCWorksCorpusExtractor().extract_documents()
+    KCWorksCorpusExtractor().extract_documents(
+        max_docs=corpus_size,
+        verbose=verbose,
+        overwrite=overwrite,
+        chunk_size=chunk_size,
+    )
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(
+        description=(
+            "Download and extract KCWorks documents into a csv file "
+            "of chunked text sections."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=""" """,
+    )
+
+    parser.add_argument(
+        "--corpus-size",
+        "-c",
+        type=int,
+        help="Number of documents to download and extract",
+    )
+    parser.add_argument(
+        "--verbose", "-v", action="store_true", help="Enable verbose output"
+    )
+    parser.add_argument(
+        "--overwrite",
+        "-o",
+        action="store_true",
+        help="Re-process and replace documents that already exist in the file.",
+    )
+    parser.add_argument(
+        "--chunk-size",
+        "-s",
+        type=int,
+        help="Number of characters to include in each chunk.",
+    )
+
+    args = parser.parse_args()
+    main(
+        verbose=args.verbose,
+        corpus_size=args.corpus_size,
+        overwrite=args.overwrite,
+        chunk_size=args.chunk_size,
+    )

@@ -21,4 +21,4 @@ __pycache__/
 **/embedding_statistics_report.csv
 **/output9_analysis_report.csv
 **/text4test/*
-**/legacy/tools/*
+**/legacy/tools/**.egg-info/
