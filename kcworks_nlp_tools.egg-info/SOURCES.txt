@@ -16,7 +16,8 @@ kcworks_nlp_tools.egg-info/requires.txt
 kcworks_nlp_tools.egg-info/top_level.txt
 kcworks_nlp_tools/data/fast_subjects/__init__.py
 kcworks_nlp_tools/database/__init__.py
-kcworks_nlp_tools/database/db.py
+kcworks_nlp_tools/database/sqlalchemy/__init__.py
+kcworks_nlp_tools/database/sqlalchemy/db.py
 kcworks_nlp_tools/legacy/stage2/apiinvenio_ninth.py
 kcworks_nlp_tools/legacy/stage2/examine_output9.py
 kcworks_nlp_tools/legacy/stage3/csv_preprocessing_minimal.py

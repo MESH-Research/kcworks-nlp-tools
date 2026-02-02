@@ -22,3 +22,15 @@ __pycache__/
 **/output9_analysis_report.csv
 **/text4test/*
 **/legacy/tools/**.egg-info/
+kcworks_nlp_tools/data/fast_subjects/subjects_fast_chronological.jsonl
+kcworks_nlp_tools/data/fast_subjects/subjects_fast_corporate.jsonl
+kcworks_nlp_tools/data/fast_subjects/subjects_fast_event.jsonl
+kcworks_nlp_tools/data/fast_subjects/subjects_fast_formgenre.jsonl
+kcworks_nlp_tools/data/fast_subjects/subjects_fast_geographic.jsonl
+kcworks_nlp_tools/data/fast_subjects/subjects_fast_meeting.jsonl
+kcworks_nlp_tools/data/fast_subjects/subjects_fast_personal.jsonl
+kcworks_nlp_tools/data/fast_subjects/subjects_fast_title.jsonl
+kcworks_nlp_tools/data/fast_subjects/subjects_fast_topical.jsonl
+# Chroma DB – ignore all DB files; keep folder and .gitkeep
+kcworks_nlp_tools/database/chroma_langchain_db/*
+!kcworks_nlp_tools/database/chroma_langchain_db/.gitkeep
