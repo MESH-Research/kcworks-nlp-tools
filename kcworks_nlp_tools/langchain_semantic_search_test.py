@@ -1,7 +1,15 @@
 #! /usr/bin/python
 
-from collections.abc import Generator
+# When run directly (e.g. python kcworks_nlp_tools/langchain_semantic_search_test.py), add project root to sys.path so the package is importable.
+import sys
 from pathlib import Path
+
+if not __package__:
+    _root = Path(__file__).resolve().parent.parent
+    if str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
+
+from collections.abc import Generator
 from typing import Callable
 
 import argparse
@@ -13,15 +21,25 @@ from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from kcworks_nlp_tools import config
 from kcworks_nlp_tools.dependencies import extract_fast_files
 from kcworks_nlp_tools.util import overwrite, timed, get_package_root
 
-DEFAULT_RESULT_SIZE = 20
-DEFAULT_CHUNK_SIZE = 500
-DEFAULT_CHUNK_OVERLAP = 100
-DEFAULT_FETCH_K = 20
-DEFAULT_LAMBDA_MULT = 0.5
-DEFAULT_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+
+def _model_slug(model_name: str) -> str:
+    """Return the slug for model_name from config.MODEL_SLUGS. Raises if the model is not in the config."""
+    if model_name not in config.MODEL_SLUGS:
+        raise ValueError(
+            f"Unknown model {model_name!r}. Add it to MODEL_SLUGS in config.py (model name -> short slug for DB dirs)."
+        )
+    return config.MODEL_SLUGS[model_name]
+
+
+def _chroma_persist_directory(algorithm: str, model_slug: str) -> str:
+    """Persist directory under package database dir: chroma_langchain_db-{model_slug}-{algorithm}. Creates the directory if needed."""
+    path = Path(get_package_root()) / "database" / f"{config.CHROMA_DB_DIR_NAME}-{model_slug}-{algorithm}"
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path)
 
 
 class JSONSource:
@@ -43,44 +61,7 @@ class JSONSource:
         splitter: RecursiveCharacterTextSplitter | None = None,
     ) -> Generator[Document]:
         """Load json source documents."""
-        facets = [
-            {
-                "file": "data/fast_subjects/subjects_fast_topical.jsonl",
-                "template": "the topic",
-            },
-            {
-                "file": "data/fast_subjects/subjects_fast_chronological.jsonl",
-                "template": "the chronological date or period",
-            },
-            {
-                "file": "data/fast_subjects/subjects_fast_corporate.jsonl",
-                "template": "the organization, group, or movement",
-            },
-            {
-                "file": "data/fast_subjects/subjects_fast_event.jsonl",
-                "template": "the historical or current event",
-            },
-            {
-                "file": "data/fast_subjects/subjects_fast_formgenre.jsonl",
-                "template": "the media form or genre",
-            },
-            {
-                "file": "data/fast_subjects/subjects_fast_geographic.jsonl",
-                "template": "the geographic location or region",
-            },
-            {
-                "file": "data/fast_subjects/subjects_fast_meeting.jsonl",
-                "template": "the meeting, conference, or event for dialogue",
-            },
-            {
-                "file": "data/fast_subjects/subjects_fast_personal.jsonl",
-                "template": "the person",
-            },
-            {
-                "file": "data/fast_subjects/subjects_fast_title.jsonl",
-                "template": "the title of a work",
-            },
-        ]
+        facets = list(config.FACETS)
         paths = [facet["file"] for facet in facets]
         # ensure JSON source files are available
         file_result = extract_fast_files(paths)
@@ -104,7 +85,7 @@ class JSONSource:
                 for line in json_file:
                     line_count += 1
 
-                    if limit >= 0 and line_count > limit:
+                    if limit and limit >= 0 and line_count > limit:
                         break
                     if not line.strip():
                         continue
@@ -129,22 +110,48 @@ class VectorStore:
 
     def __init__(
         self,
-        model_name: str = DEFAULT_MODEL_NAME,
+        model_name: str = config.DEFAULT_MODEL_NAME,
         chunk_size: int = 500,
         chunk_overlap: int = 100,
+        distance_algorithm: str = config.DEFAULT_DISTANCE_ALGORITHM,
     ):
-        """Initialize a Searcher object."""
+        """Initialize a VectorStore.
+
+        Args:
+            model_name: HuggingFace model for embeddings.
+            chunk_size: Max tokens per chunk.
+            chunk_overlap: Overlap between chunks.
+            distance_algorithm: Chroma comparison algorithm: 'l2', 'cosine', or 'ip'.
+                Determines persist directory (e.g. ...-cosine) and collection metadata.
+        """
+        if distance_algorithm not in config.CHROMA_DISTANCE_ALGORITHMS:
+            raise ValueError(
+                f"distance_algorithm must be one of {config.CHROMA_DISTANCE_ALGORITHMS}, got {distance_algorithm!r}"
+            )
+        self.distance_algorithm = distance_algorithm
         self.splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size, chunk_overlap=chunk_overlap, add_start_index=True
         )
 
         self.embeddings = HuggingFaceEmbeddings(model_name=model_name)
+        self._initialize_model()
 
+        model_slug = _model_slug(model_name)  # from config.MODEL_SLUGS; used in persist path
+        self.persist_directory = _chroma_persist_directory(distance_algorithm, model_slug)
+        print(f"** vector store path: {self.persist_directory}")
         self.store = Chroma(
             collection_name="fast_subjects",
             embedding_function=self.embeddings,
-            persist_directory="./database/chroma_langchain_db",
+            persist_directory=self.persist_directory,
+            collection_metadata={"hnsw:space": distance_algorithm},
         )
+
+    def _initialize_model(self) -> None:
+        """
+        Perform initial embedding to load model.
+        """
+        with timed("initializing model with first embedding"):
+            self.embeddings.embed_query("warmup")
 
     def store_vectors(self, docs: Generator[Document]) -> tuple[int, int]:
         """Generate embeddings and store in db."""
@@ -365,28 +372,28 @@ def main():
     parser.add_argument(
         "--model_name",
         "-m",
-        default=DEFAULT_MODEL_NAME,
-        help="Limit the number of subject term vectors generated (if --generate is True).",
+        default=config.DEFAULT_MODEL_NAME,
+        help="Embedding model name (e.g. sentence-transformers/...). Determines DB subdir via config.MODEL_SLUGS. Default: %(default)s.",
     )
     parser.add_argument(
         "--chunk_size",
         "-c",
         type=int,
-        default=DEFAULT_CHUNK_SIZE,
+        default=config.DEFAULT_CHUNK_SIZE,
         help="Max number of tokens in each document. Default is 500.",
     )
     parser.add_argument(
         "--chunk_overlap",
         "-o",
         type=int,
-        default=DEFAULT_CHUNK_OVERLAP,
+        default=config.DEFAULT_CHUNK_OVERLAP,
         help="Number of tokens to overlap between chunks in split documents. Default is 100.",
     )
     parser.add_argument(
         "--size",
         "-s",
         type=int,
-        default=DEFAULT_RESULT_SIZE,
+        default=config.DEFAULT_RESULT_SIZE,
         help="Number of search results to return. Default is 10.",
     )
     parser.add_argument(
@@ -394,6 +401,12 @@ def main():
         "-f",
         type=str,
         help="Filter to constrain search results (dict as string, e.g. \"{'scheme': 'topical'}\")",
+    )
+    parser.add_argument(
+        "--facet",
+        type=str,
+        choices=config.FACET_SCHEME_NAMES,
+        help="Restrict search to this scheme (facet) only. Sets filter to scheme=<facet>.",
     )
     parser.add_argument(
         "--where",
@@ -406,7 +419,7 @@ def main():
     parser.add_argument(
         "--fetch-k",
         type=int,
-        default=DEFAULT_FETCH_K,
+        default=config.DEFAULT_FETCH_K,
         help=(
             "Number of documents to pass to the MMR algorithm. (Only applies to max-marginal-relevance searches.) Default is 20."
         ),
@@ -415,34 +428,56 @@ def main():
         "--lambda-mult",
         dest="lambda_mult",
         type=float,
-        default=DEFAULT_LAMBDA_MULT,
+        default=config.DEFAULT_LAMBDA_MULT,
         help="Number between 0 and 1 that determines the degree of diversity among the results with 0 corresponding to maximum diversity and 1 to minimum diversity. (Only applies to max-marginal-relevance searches.)",
+    )
+    parser.add_argument(
+        "--distance",
+        "-d",
+        dest="distance_algorithm",
+        choices=config.CHROMA_DISTANCE_ALGORITHMS,
+        default=config.DEFAULT_DISTANCE_ALGORITHM,
+        help="Chroma distance algorithm for the vector store. Uses a separate DB directory per algorithm (e.g. ...-cosine). Default: %(default)s.",
     )
     args = parser.parse_args()
 
     filter_dict = ast.literal_eval(args.filter) if args.filter is not None else None
+    if args.facet is not None:
+        filter_dict = {**(filter_dict or {}), "scheme": args.facet}
     where_dict = ast.literal_eval(args.where) if args.where is not None else None
-    chunk_size = args.chunk_size or DEFAULT_CHUNK_SIZE
-    chunk_overlap = args.chunk_overlap or DEFAULT_CHUNK_OVERLAP
+    chunk_size = args.chunk_size or config.DEFAULT_CHUNK_SIZE
+    chunk_overlap = args.chunk_overlap or config.DEFAULT_CHUNK_OVERLAP
 
-    # get subject terms vector store
-    vector_store = VectorStore(
-        model_name=args.model_name,
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-    )
-    if args.generate_docs:
-        json_source = JSONSource()
-        vector_store.load_docs(json_source, limit=args.limit_terms)
+    # get subject terms vector store (persist dir and collection use --distance)
+    with timed("initializing VectorStore"):
+        vector_store = VectorStore(
+            model_name=args.model_name,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            distance_algorithm=args.distance_algorithm,
+        )
+    with timed("generating docs from JSONSource"):
+        if args.generate_docs is True:
+            with timed("initializing JSONSource"):
+                json_source = JSONSource()
+            with timed("loading docs from JSONSource"):
+                vector_store.load_docs(json_source, limit=args.limit_terms)
 
     # search for the search string
-    searcher = Searcher(vector_store=vector_store.store)
+    with timed("initializing Searcher"):
+        searcher = Searcher(vector_store=vector_store.store)
 
-    searcher.search(
+    results = searcher.search(
         search_string=args.search_string,
         result_size=args.size,
         filter=filter_dict,
     )
+    if not results and vector_store.persist_directory:
+        print(
+            "** No results. If the store is empty, run with --generate-docs to populate. "
+            f"DB path: {vector_store.persist_directory}"
+        )
+
     searcher.search_with_score(
         search_string=args.search_string,
         result_size=args.size,

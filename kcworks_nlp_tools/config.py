@@ -23,3 +23,34 @@ PREPROCESSED_PATH = Path(OUTPUT_FILES_PATH) / "preprocessed.csv"
 TIKA_LOG_PATH = LOGS_PATH
 TIKA_PATH = Path(current_dir) / "lib"
 TIKA_LOG_FILE = "tika.log"
+
+# Langchain semantic search (langchain_semantic_search_test.py)
+DEFAULT_RESULT_SIZE = 20
+DEFAULT_CHUNK_SIZE = 500
+DEFAULT_CHUNK_OVERLAP = 100
+DEFAULT_FETCH_K = 20
+DEFAULT_LAMBDA_MULT = 0.5
+DEFAULT_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+# Short slugs for embedding model names (DB dir names). Add an entry for every model you use.
+MODEL_SLUGS: dict[str, str] = {
+    "sentence-transformers/paraphrase-multilingual-mpnet-base-v2": "mpnet",
+    "sentence-transformers/all-MiniLM-L6-v2": "minilm-l6",
+    "sentence-transformers/all-mpnet-base-v2": "mpnet-base",
+}
+CHROMA_DISTANCE_ALGORITHMS = ("l2", "cosine", "ip")
+DEFAULT_DISTANCE_ALGORITHM = "l2"
+CHROMA_DB_DIR_NAME = "chroma_langchain_db"
+# Facets (schemes) for loading and search. One dict per facet: scheme, file, template.
+# scheme = metadata "scheme" in the vector store and --facet choices.
+FACETS = (
+    {"scheme": "topical", "file": "data/fast_subjects/subjects_fast_topical.jsonl", "template": "the topic"},
+    {"scheme": "chronological", "file": "data/fast_subjects/subjects_fast_chronological.jsonl", "template": "the chronological date or period"},
+    {"scheme": "corporate", "file": "data/fast_subjects/subjects_fast_corporate.jsonl", "template": "the organization, group, or movement"},
+    {"scheme": "event", "file": "data/fast_subjects/subjects_fast_event.jsonl", "template": "the historical or current event"},
+    {"scheme": "formgenre", "file": "data/fast_subjects/subjects_fast_formgenre.jsonl", "template": "the media form or genre"},
+    {"scheme": "geographic", "file": "data/fast_subjects/subjects_fast_geographic.jsonl", "template": "the geographic location or region"},
+    {"scheme": "meeting", "file": "data/fast_subjects/subjects_fast_meeting.jsonl", "template": "the meeting, conference, or event for dialogue"},
+    {"scheme": "personal", "file": "data/fast_subjects/subjects_fast_personal.jsonl", "template": "the person"},
+    {"scheme": "title", "file": "data/fast_subjects/subjects_fast_title.jsonl", "template": "the title of a work"},
+)
+FACET_SCHEME_NAMES = tuple(f["scheme"] for f in FACETS)

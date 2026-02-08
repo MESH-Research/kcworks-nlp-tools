@@ -31,6 +31,6 @@ kcworks_nlp_tools/data/fast_subjects/subjects_fast_meeting.jsonl
 kcworks_nlp_tools/data/fast_subjects/subjects_fast_personal.jsonl
 kcworks_nlp_tools/data/fast_subjects/subjects_fast_title.jsonl
 kcworks_nlp_tools/data/fast_subjects/subjects_fast_topical.jsonl
-# Chroma DB – ignore all DB files; keep folder and .gitkeep
-kcworks_nlp_tools/database/chroma_langchain_db/*
-!kcworks_nlp_tools/database/chroma_langchain_db/.gitkeep
+# Chroma DB – ignore all DB files; keep folder and .gitkeep (one dir per distance algorithm: -l2, -cosine, -ip)
+kcworks_nlp_tools/database/chroma_langchain_db-*/*
+!kcworks_nlp_tools/database/chroma_langchain_db-*/.gitkeep
