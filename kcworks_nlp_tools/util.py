@@ -1,22 +1,19 @@
 import importlib.util
 import os
+import time
 from contextlib import contextmanager
-from timeit import Timer
 
 
 @contextmanager
 def timed(operation_name: str | None = None):
-    """Initializa a timing context manager"""
-    timer = Timer()
-    start_time: int | None = None
-
+    """Context manager that times the block and prints elapsed seconds."""
+    start_time = time.perf_counter()
     try:
-        start_time = timer.timeit()
+        print(f"** starting {operation_name}")
         yield
-
     finally:
-        end_time = timer.timeit()
-        print(f"** {operation_name + ' ' or ' '}took {end_time - start_time} seconds")
+        elapsed = time.perf_counter() - start_time
+        print(f"** {operation_name + ' ' or ' '}took {elapsed} seconds")
 
 
 def overwrite(text: str, **kwargs):
