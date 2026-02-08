@@ -37,7 +37,11 @@ def _model_slug(model_name: str) -> str:
 
 def _chroma_persist_directory(algorithm: str, model_slug: str) -> str:
     """Persist directory under package database dir: chroma_langchain_db-{model_slug}-{algorithm}. Creates the directory if needed."""
-    path = Path(get_package_root()) / "database" / f"{config.CHROMA_DB_DIR_NAME}-{model_slug}-{algorithm}"
+    path = (
+        Path(get_package_root())
+        / "database"
+        / f"{config.CHROMA_DB_DIR_NAME}-{model_slug}-{algorithm}"
+    )
     path.mkdir(parents=True, exist_ok=True)
     return str(path)
 
@@ -134,10 +138,13 @@ class VectorStore:
         )
 
         self.embeddings = HuggingFaceEmbeddings(model_name=model_name)
-        self._initialize_model()
 
-        model_slug = _model_slug(model_name)  # from config.MODEL_SLUGS; used in persist path
-        self.persist_directory = _chroma_persist_directory(distance_algorithm, model_slug)
+        model_slug = _model_slug(
+            model_name
+        )  # from config.MODEL_SLUGS; used in persist path
+        self.persist_directory = _chroma_persist_directory(
+            distance_algorithm, model_slug
+        )
         print(f"** vector store path: {self.persist_directory}")
         self.store = Chroma(
             collection_name="fast_subjects",
@@ -145,13 +152,19 @@ class VectorStore:
             persist_directory=self.persist_directory,
             collection_metadata={"hnsw:space": distance_algorithm},
         )
+        self._warmup_store()
 
-    def _initialize_model(self) -> None:
-        """
-        Perform initial embedding to load model.
-        """
-        with timed("initializing model with first embedding"):
-            self.embeddings.embed_query("warmup")
+    def _warmup_store(self) -> None:
+        """Run two searches so Chroma and the wrapper absorb any second-call one-time cost."""
+        with timed("warmup search (Chroma index load)"):
+            self.store.similarity_search(
+                "warmup searches in artificial intelligence semantic retrieval",
+                k=config.DEFAULT_RESULT_SIZE,
+            )
+            self.store.similarity_search(
+                "warmup searches in artificial intelligence semantic retrieval",
+                k=config.DEFAULT_RESULT_SIZE,
+            )
 
     def store_vectors(self, docs: Generator[Document]) -> tuple[int, int]:
         """Generate embeddings and store in db."""
@@ -304,7 +317,7 @@ class Searcher:
         This search algorithm takes into account both document similarity
         *and* diversity in returned documents.
         """
-        print("Starting similarity search with distance score...")
+        print("Starting max marginal relevance search...")
         search_func = self.vector_store.max_marginal_relevance_search
         results = self._search(
             search_string, search_func, result_size=10, fetch_k=20, lambda_mult=0.5
@@ -467,16 +480,11 @@ def main():
     with timed("initializing Searcher"):
         searcher = Searcher(vector_store=vector_store.store)
 
-    results = searcher.search(
+    searcher.search(
         search_string=args.search_string,
         result_size=args.size,
         filter=filter_dict,
     )
-    if not results and vector_store.persist_directory:
-        print(
-            "** No results. If the store is empty, run with --generate-docs to populate. "
-            f"DB path: {vector_store.persist_directory}"
-        )
 
     searcher.search_with_score(
         search_string=args.search_string,
@@ -484,6 +492,7 @@ def main():
         filter=filter_dict,
         where_document=where_dict,
     )
+
     searcher.search_marginal_relevance(
         search_string=args.search_string,
         result_size=args.size,
