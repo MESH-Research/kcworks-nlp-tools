@@ -1,0 +1,41 @@
+# OpenSearch single-node for local dev (vector/k-NN and hybrid search).
+# Based on official 3.x compose: https://github.com/opensearch-project/opensearch-build/blob/main/docker/release/dockercomposefiles/docker-compose-3.x.yml
+# Start: docker compose up -d
+# Stop:  docker compose down
+# Logs:  docker compose logs -f nlp_opensearch
+# Require: .env with OPENSEARCH_INITIAL_ADMIN_PASSWORD. Must be strong (8+ chars, upper, lower, digit, symbol; avoid common patterns). Test: https://lowe.github.io/tryzxcvbn
+
+services:
+  opensearch:
+    image: opensearchproject/opensearch:3
+    container_name: nlp_opensearch
+    environment:
+      - cluster.name=opensearch-nlp-cluster
+      - node.name=opensearch-node1
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_INITIAL_ADMIN_PASSWORD}
+      - plugins.security.ssl.http.enabled=false
+      - plugins.security.ssl.transport.enabled=false
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -f -u admin:${OPENSEARCH_INITIAL_ADMIN_PASSWORD} http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
+volumes:
+  opensearch-data:

@@ -27,6 +27,16 @@ Configuration variables are set in the `config.py` file. Available config values
 | TIKA_SERVER_ENDPOINT    | str  | URL for Tika server (defaults to "http://localhost:9998")                |
 
 
+## OpenSearch (Docker)
+
+For the OpenSearch vector-store backend (optional), run OpenSearch locally:
+
+1. Copy `env.example` to `.env` and set `OPENSEARCH_INITIAL_ADMIN_PASSWORD` (min 8 chars; include upper, lower, number, symbol).
+2. Start: `docker compose up -d`
+3. Verify: `curl -u admin:YOUR_PASSWORD http://localhost:9200` (or use the same credentials in `.env` as `OPENSEARCH_USER` / `OPENSEARCH_PASSWORD` when using `--backend opensearch`).
+
+The image uses OpenSearch 2 (latest stable 2.x) with the k-NN plugin for vector search.
+
 ## Required environment variables
 
 A few required environment variables must be provided in a `.env` file placed at the top level of this project folder (i.e., the same folder that contains this README file). These variables must include:
