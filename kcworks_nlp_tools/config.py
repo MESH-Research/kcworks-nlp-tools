@@ -54,3 +54,9 @@ FACETS = (
     {"scheme": "title", "file": "data/fast_subjects/subjects_fast_title.jsonl", "template": "the title of a work"},
 )
 FACET_SCHEME_NAMES = tuple(f["scheme"] for f in FACETS)
+
+# Vector store backend: "chroma" | "opensearch". Env VECTOR_STORE_BACKEND; CLI --backend overrides.
+VECTOR_STORE_BACKEND = os.getenv("VECTOR_STORE_BACKEND", "chroma").lower()
+if VECTOR_STORE_BACKEND not in ("chroma", "opensearch"):
+    VECTOR_STORE_BACKEND = "chroma"
+

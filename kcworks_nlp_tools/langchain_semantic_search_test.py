@@ -9,8 +9,9 @@ if not __package__:
     if str(_root) not in sys.path:
         sys.path.insert(0, str(_root))
 
+from abc import ABC, abstractmethod
 from collections.abc import Generator
-from typing import Callable
+from typing import Any, Callable
 
 import argparse
 import ast
@@ -24,6 +25,59 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from kcworks_nlp_tools import config
 from kcworks_nlp_tools.dependencies import extract_fast_files
 from kcworks_nlp_tools.util import overwrite, timed, get_package_root
+
+
+class VectorStore(ABC):
+    """Abstract interface for the store object passed to Searcher.
+
+    Implementations (ChromaVectorStore, OpenSearchVectorStore) delegate to their
+    backend. Searcher calls only these four methods.
+    """
+
+    @abstractmethod
+    def similarity_search(
+        self,
+        query: str,
+        k: int = 10,
+        filter: dict[str, str] | None = None,
+        **kwargs: Any,
+    ) -> list[Document]:
+        """Return documents most similar to the query."""
+        ...
+
+    @abstractmethod
+    def similarity_search_with_score(
+        self,
+        query: str,
+        k: int = 10,
+        filter: dict[str, str] | None = None,
+        **kwargs: Any,
+    ) -> list[tuple[Document, float]]:
+        """Return documents and similarity scores."""
+        ...
+
+    @abstractmethod
+    def max_marginal_relevance_search(
+        self,
+        query: str,
+        k: int = 10,
+        fetch_k: int = 20,
+        lambda_mult: float = 0.5,
+        **kwargs: Any,
+    ) -> list[Document]:
+        """Return documents balanced for similarity and diversity."""
+        ...
+
+    @abstractmethod
+    def hybrid_search(
+        self,
+        query_string: str,
+        k: int = 10,
+        filter: dict[str, str] | None = None,
+        **kwargs: Any,
+    ) -> list[Document]:
+        """Return documents from hybrid (e.g. vector + keyword) search."""
+        ...
 
 
 def _model_slug(model_name: str) -> str:
@@ -109,8 +163,8 @@ class JSONSource:
                 print("Done yielding JSON documents for search terms...")
 
 
-class VectorStore:
-    """Class to create and manage a vector_store"""
+class ChromaVectorStore(VectorStore):
+    """Chroma-backed vector store: create and manage vectors, delegate search to Chroma."""
 
     def __init__(
         self,
@@ -119,7 +173,7 @@ class VectorStore:
         chunk_overlap: int = 100,
         distance_algorithm: str = config.DEFAULT_DISTANCE_ALGORITHM,
     ):
-        """Initialize a VectorStore.
+        """Initialize a ChromaVectorStore.
 
         Args:
             model_name: HuggingFace model for embeddings.
@@ -216,6 +270,56 @@ class VectorStore:
         """
         docs = json_source.load(limit=limit, splitter=self.splitter)
         self.store_vectors(docs)
+
+    def similarity_search(
+        self,
+        query: str,
+        k: int = 10,
+        filter: dict[str, str] | None = None,
+        **kwargs: Any,
+    ) -> list[Document]:
+        return self.store.similarity_search(query, k=k, filter=filter, **kwargs)
+
+    def similarity_search_with_score(
+        self,
+        query: str,
+        k: int = 10,
+        filter: dict[str, str] | None = None,
+        **kwargs: Any,
+    ) -> list[tuple[Document, float]]:
+        return self.store.similarity_search_with_score(
+            query, k=k, filter=filter, **kwargs
+        )
+
+    def max_marginal_relevance_search(
+        self,
+        query: str,
+        k: int = 10,
+        fetch_k: int = 20,
+        lambda_mult: float = 0.5,
+        **kwargs: Any,
+    ) -> list[Document]:
+        return self.store.max_marginal_relevance_search(
+            query, k=k, fetch_k=fetch_k, lambda_mult=lambda_mult, **kwargs
+        )
+
+    def hybrid_search(
+        self,
+        query_string: str,
+        k: int = 10,
+        filter: dict[str, str] | None = None,
+        **kwargs: Any,
+    ) -> list[Document]:
+        hybrid_rank = Rrf(
+            ranks=[
+                Knn(query="query", return_rank=True, limit=300),
+                Knn(query="query learning applications", key="sparse_embedding"),
+            ],
+            weights=[2.0, 1.0],
+            k=60,
+        )
+        search = Search().rank(hybrid_rank).limit(k)
+        return self.store.hybrid_search(search)
 
 
 class Searcher:
@@ -335,28 +439,13 @@ class Searcher:
         where_document: dict[str, str] | None = None,
     ):
         """Perform a hybrid search."""
-        hybrid_rank = Rrf(
-            ranks=[
-                Knn(query="query", return_rank=True, limit=300),
-                Knn(query="query learning applications", key="sparse_embedding"),
-            ],
-            weights=[2.0, 1.0],  # Dense 2x more important
-            k=60,
-        )
-
-        search = (
-            Search()
-            # .where((K("language") == "en") & (K("year") >= 2020))
-            .rank(hybrid_rank)
-            .limit(10)
-            # .select(K.DOCUMENT, K.SCORE, "title", "year")
-        )
-
         with timed(operation_name="hybrid_search"):
             print("-" * 20)
             print(f'Finding a match for "{search_string}"')
             print("-" * 20)
-            results = self.vector_store.hybrid_search(search)
+            results = self.vector_store.hybrid_search(
+                search_string, k=result_size, filter=filter
+            )
             print("Results")
             print("-" * 20)
 
@@ -452,6 +541,13 @@ def main():
         default=config.DEFAULT_DISTANCE_ALGORITHM,
         help="Chroma distance algorithm for the vector store. Uses a separate DB directory per algorithm (e.g. ...-cosine). Default: %(default)s.",
     )
+    parser.add_argument(
+        "--backend",
+        "-b",
+        choices=("chroma", "opensearch"),
+        default=config.VECTOR_STORE_BACKEND,
+        help="Vector store backend (chroma or opensearch). Default from env VECTOR_STORE_BACKEND or chroma.",
+    )
     args = parser.parse_args()
 
     filter_dict = ast.literal_eval(args.filter) if args.filter is not None else None
@@ -460,15 +556,23 @@ def main():
     where_dict = ast.literal_eval(args.where) if args.where is not None else None
     chunk_size = args.chunk_size or config.DEFAULT_CHUNK_SIZE
     chunk_overlap = args.chunk_overlap or config.DEFAULT_CHUNK_OVERLAP
+    backend = args.backend
 
     # get subject terms vector store (persist dir and collection use --distance)
     with timed("initializing VectorStore"):
-        vector_store = VectorStore(
-            model_name=args.model_name,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            distance_algorithm=args.distance_algorithm,
-        )
+        if backend == "chroma":
+            vector_store = ChromaVectorStore(
+                model_name=args.model_name,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                distance_algorithm=args.distance_algorithm,
+            )
+        elif backend == "opensearch":
+            raise NotImplementedError(
+                "OpenSearch backend is not implemented yet. Use --backend chroma."
+            )
+        else:
+            raise ValueError(f"Unknown backend: {backend!r}")
     with timed("generating docs from JSONSource"):
         if args.generate_docs is True:
             with timed("initializing JSONSource"):
@@ -478,7 +582,7 @@ def main():
 
     # search for the search string
     with timed("initializing Searcher"):
-        searcher = Searcher(vector_store=vector_store.store)
+        searcher = Searcher(vector_store=vector_store)
 
     searcher.search(
         search_string=args.search_string,
