@@ -35,6 +35,8 @@ For the OpenSearch vector-store backend (optional), run OpenSearch locally:
 2. Start: `docker compose up -d`
 3. Verify: `curl -u admin:YOUR_PASSWORD http://localhost:9200` (or use the same credentials in `.env` as `OPENSEARCH_USER` / `OPENSEARCH_PASSWORD` when using `--backend opensearch`).
 
+4. Index vectors before searching: either run with `--backend opensearch --generate-docs` (and optionally `--limit-terms N`), or migrate from Chroma with `--backend opensearch --migrate-from chroma` (same `--model_name` and `--distance` as the Chroma DB; no re-embedding). After that you can search with or without `--generate-docs`.
+
 The image uses OpenSearch 2 (latest stable 2.x) with the k-NN plugin for vector search.
 
 ## Required environment variables

@@ -40,6 +40,12 @@ MODEL_SLUGS: dict[str, str] = {
 CHROMA_DISTANCE_ALGORITHMS = ("l2", "cosine", "ip")
 DEFAULT_DISTANCE_ALGORITHM = "l2"
 CHROMA_DB_DIR_NAME = "chroma_langchain_db"
+# OpenSearch knn space_type per distance algorithm (same keys as CHROMA_DISTANCE_ALGORITHMS).
+OPENSEARCH_SPACE_TYPES: dict[str, str] = {
+    "l2": "l2",
+    "cosine": "cosinesimil",
+    "ip": "innerproduct",
+}
 # Facets (schemes) for loading and search. One dict per facet: scheme, file, template.
 # scheme = metadata "scheme" in the vector store and --facet choices.
 FACETS = (

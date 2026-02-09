@@ -15,7 +15,9 @@ from typing import Any, Callable
 
 import argparse
 import ast
+import os
 import orjson
+import chromadb
 from chromadb import Search, Knn, Rrf
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
@@ -23,81 +25,9 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from kcworks_nlp_tools import config
+from langchain_community.vectorstores import OpenSearchVectorSearch
 from kcworks_nlp_tools.dependencies import extract_fast_files
 from kcworks_nlp_tools.util import overwrite, timed, get_package_root
-
-
-class VectorStore(ABC):
-    """Abstract interface for the store object passed to Searcher.
-
-    Implementations (ChromaVectorStore, OpenSearchVectorStore) delegate to their
-    backend. Searcher calls only these four methods.
-    """
-
-    @abstractmethod
-    def similarity_search(
-        self,
-        query: str,
-        k: int = 10,
-        filter: dict[str, str] | None = None,
-        **kwargs: Any,
-    ) -> list[Document]:
-        """Return documents most similar to the query."""
-        ...
-
-    @abstractmethod
-    def similarity_search_with_score(
-        self,
-        query: str,
-        k: int = 10,
-        filter: dict[str, str] | None = None,
-        **kwargs: Any,
-    ) -> list[tuple[Document, float]]:
-        """Return documents and similarity scores."""
-        ...
-
-    @abstractmethod
-    def max_marginal_relevance_search(
-        self,
-        query: str,
-        k: int = 10,
-        fetch_k: int = 20,
-        lambda_mult: float = 0.5,
-        **kwargs: Any,
-    ) -> list[Document]:
-        """Return documents balanced for similarity and diversity."""
-        ...
-
-    @abstractmethod
-    def hybrid_search(
-        self,
-        query_string: str,
-        k: int = 10,
-        filter: dict[str, str] | None = None,
-        **kwargs: Any,
-    ) -> list[Document]:
-        """Return documents from hybrid (e.g. vector + keyword) search."""
-        ...
-
-
-def _model_slug(model_name: str) -> str:
-    """Return the slug for model_name from config.MODEL_SLUGS. Raises if the model is not in the config."""
-    if model_name not in config.MODEL_SLUGS:
-        raise ValueError(
-            f"Unknown model {model_name!r}. Add it to MODEL_SLUGS in config.py (model name -> short slug for DB dirs)."
-        )
-    return config.MODEL_SLUGS[model_name]
-
-
-def _chroma_persist_directory(algorithm: str, model_slug: str) -> str:
-    """Persist directory under package database dir: chroma_langchain_db-{model_slug}-{algorithm}. Creates the directory if needed."""
-    path = (
-        Path(get_package_root())
-        / "database"
-        / f"{config.CHROMA_DB_DIR_NAME}-{model_slug}-{algorithm}"
-    )
-    path.mkdir(parents=True, exist_ok=True)
-    return str(path)
 
 
 class JSONSource:
@@ -163,8 +93,14 @@ class JSONSource:
                 print("Done yielding JSON documents for search terms...")
 
 
-class ChromaVectorStore(VectorStore):
-    """Chroma-backed vector store: create and manage vectors, delegate search to Chroma."""
+class VectorStore(ABC):
+    """Abstract interface for the store object passed to Searcher.
+
+    Implementations provide _store (the LangChain store) and
+    _filter_kwargs(filter) so the base can call the same LangChain methods
+    (similarity_search, etc.) with the right filter param name (Chroma: filter=,
+    OpenSearch: pre_filter=). hybrid_search is backend-specific.
+    """
 
     def __init__(
         self,
@@ -172,88 +108,41 @@ class ChromaVectorStore(VectorStore):
         chunk_size: int = 500,
         chunk_overlap: int = 100,
         distance_algorithm: str = config.DEFAULT_DISTANCE_ALGORITHM,
-    ):
-        """Initialize a ChromaVectorStore.
-
-        Args:
-            model_name: HuggingFace model for embeddings.
-            chunk_size: Max tokens per chunk.
-            chunk_overlap: Overlap between chunks.
-            distance_algorithm: Chroma comparison algorithm: 'l2', 'cosine', or 'ip'.
-                Determines persist directory (e.g. ...-cosine) and collection metadata.
-        """
+    ) -> None:
         if distance_algorithm not in config.CHROMA_DISTANCE_ALGORITHMS:
             raise ValueError(
                 f"distance_algorithm must be one of {config.CHROMA_DISTANCE_ALGORITHMS}, got {distance_algorithm!r}"
             )
+        self.model_name = model_name
         self.distance_algorithm = distance_algorithm
         self.splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size, chunk_overlap=chunk_overlap, add_start_index=True
         )
-
         self.embeddings = HuggingFaceEmbeddings(model_name=model_name)
 
-        model_slug = _model_slug(
-            model_name
-        )  # from config.MODEL_SLUGS; used in persist path
-        self.persist_directory = _chroma_persist_directory(
-            distance_algorithm, model_slug
-        )
-        print(f"** vector store path: {self.persist_directory}")
-        self.store = Chroma(
-            collection_name="fast_subjects",
-            embedding_function=self.embeddings,
-            persist_directory=self.persist_directory,
-            collection_metadata={"hnsw:space": distance_algorithm},
-        )
-        self._warmup_store()
+    @property
+    @abstractmethod
+    def _store(self) -> Any:
+        """The LangChain vector store (Chroma or OpenSearchVectorSearch)."""
+        ...
+
+    def _filter_kwargs(self, filter: dict[str, str] | None) -> dict[str, Any]:
+        """Kwargs for the filter. Chroma: {"filter": filter}; OpenSearch: {"pre_filter": dsl}."""
+        if filter is None:
+            return {}
+        return {"filter": filter}
 
     def _warmup_store(self) -> None:
-        """Run two searches so Chroma and the wrapper absorb any second-call one-time cost."""
-        with timed("warmup search (Chroma index load)"):
-            self.store.similarity_search(
+        """Run two searches so the store absorbs any one-time cost."""
+        with timed("warmup search"):
+            self._store.similarity_search(
                 "warmup searches in artificial intelligence semantic retrieval",
                 k=config.DEFAULT_RESULT_SIZE,
             )
-            self.store.similarity_search(
+            self._store.similarity_search(
                 "warmup searches in artificial intelligence semantic retrieval",
                 k=config.DEFAULT_RESULT_SIZE,
             )
-
-    def store_vectors(self, docs: Generator[Document]) -> tuple[int, int]:
-        """Generate embeddings and store in db."""
-        seen_counter = 0
-        stored_counter = 0
-        spinner_characters = ["|", "/", "-", "\\"]
-        first_line = True
-        with timed(operation_name="store_vectors"):
-            while True:
-                try:
-                    doc = next(docs)
-                    seen_counter += 1
-                    existing_vectors = self.store.get_by_ids([doc.id])
-
-                    if len(existing_vectors) == 0:
-                        self.store.add_documents(documents=[doc], ids=[doc.id])
-                        stored_counter += 1
-                    current_spinner_char = spinner_characters[
-                        seen_counter % len(spinner_characters)
-                    ]
-                    if first_line:
-                        # First line - just print normally
-                        print(
-                            f"{current_spinner_char}  storing subject {seen_counter} ({stored_counter} new vectors)"
-                        )
-                        first_line = False
-                    else:
-                        overwrite(
-                            f"{current_spinner_char}  storing subject {seen_counter} ({stored_counter} new vectors)"
-                        )
-                except StopIteration:
-                    overwrite(
-                        f"All done storing {seen_counter} subjects as vectors ({stored_counter} new)."
-                    )
-                    return seen_counter, stored_counter
 
     def load_docs(self, json_source: JSONSource, limit: int | None = None) -> None:
         """Produce vectors for subject terms to be searched.
@@ -271,6 +160,48 @@ class ChromaVectorStore(VectorStore):
         docs = json_source.load(limit=limit, splitter=self.splitter)
         self.store_vectors(docs)
 
+    def store_vectors(self, docs: Generator[Document]) -> tuple[int, int]:
+        """Generate embeddings and store in the backend."""
+        seen_counter = 0
+        stored_counter = 0
+        spinner_characters = ["|", "/", "-", "\\"]
+        first_line = True
+        with timed(operation_name="store_vectors"):
+            while True:
+                try:
+                    doc = next(docs)
+                    seen_counter += 1
+                    if not self._doc_exists(doc):
+                        self._add_doc(doc)
+                        stored_counter += 1
+                    current_spinner_char = spinner_characters[
+                        seen_counter % len(spinner_characters)
+                    ]
+                    if first_line:
+                        print(
+                            f"{current_spinner_char}  storing subject {seen_counter} ({stored_counter} new vectors)"
+                        )
+                        first_line = False
+                    else:
+                        overwrite(
+                            f"{current_spinner_char}  storing subject {seen_counter} ({stored_counter} new vectors)"
+                        )
+                except StopIteration:
+                    overwrite(
+                        f"All done storing {seen_counter} subjects as vectors ({stored_counter} new)."
+                    )
+                    return seen_counter, stored_counter
+
+    @abstractmethod
+    def _doc_exists(self, doc: Document) -> bool:
+        """Return True if the document is already in the store (by id)."""
+        ...
+
+    @abstractmethod
+    def _add_doc(self, doc: Document) -> None:
+        """Add the document to the store (embedding and write are backend-specific)."""
+        ...
+
     def similarity_search(
         self,
         query: str,
@@ -278,7 +209,10 @@ class ChromaVectorStore(VectorStore):
         filter: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> list[Document]:
-        return self.store.similarity_search(query, k=k, filter=filter, **kwargs)
+        """Return documents most similar to the query."""
+        return self._store.similarity_search(
+            query, k=k, **self._filter_kwargs(filter), **kwargs
+        )
 
     def similarity_search_with_score(
         self,
@@ -287,8 +221,9 @@ class ChromaVectorStore(VectorStore):
         filter: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> list[tuple[Document, float]]:
-        return self.store.similarity_search_with_score(
-            query, k=k, filter=filter, **kwargs
+        """Return documents and similarity scores."""
+        return self._store.similarity_search_with_score(
+            query, k=k, **self._filter_kwargs(filter), **kwargs
         )
 
     def max_marginal_relevance_search(
@@ -299,9 +234,76 @@ class ChromaVectorStore(VectorStore):
         lambda_mult: float = 0.5,
         **kwargs: Any,
     ) -> list[Document]:
-        return self.store.max_marginal_relevance_search(
-            query, k=k, fetch_k=fetch_k, lambda_mult=lambda_mult, **kwargs
+        """Return documents balanced for similarity and diversity."""
+        filter_arg = kwargs.pop("filter", None)
+        return self._store.max_marginal_relevance_search(
+            query,
+            k=k,
+            fetch_k=fetch_k,
+            lambda_mult=lambda_mult,
+            **self._filter_kwargs(filter_arg),
+            **kwargs,
         )
+
+    @abstractmethod
+    def hybrid_search(
+        self,
+        query_string: str,
+        k: int = 10,
+        filter: dict[str, str] | None = None,
+        **kwargs: Any,
+    ) -> list[Document]:
+        """Return documents from hybrid (e.g. vector + keyword) search."""
+        ...
+
+    @staticmethod
+    def _model_slug(model_name: str) -> str:
+        """Return the slug for model_name from config.MODEL_SLUGS. Used by backends to vary paths/indices by model."""
+        if model_name not in config.MODEL_SLUGS:
+            raise ValueError(
+                f"Unknown model {model_name!r}. Add it to MODEL_SLUGS in config.py (model name -> short slug for DB dirs)."
+            )
+        return config.MODEL_SLUGS[model_name]
+
+
+class ChromaVectorStore(VectorStore):
+    """Chroma-backed vector store: create and manage vectors, delegate search to Chroma."""
+
+    @staticmethod
+    def _persist_directory(algorithm: str, model_slug: str) -> str:
+        """Persist directory under package database dir: chroma_langchain_db-{model_slug}-{algorithm}. Creates the directory if needed."""
+        path = (
+            Path(get_package_root())
+            / "database"
+            / f"{config.CHROMA_DB_DIR_NAME}-{model_slug}-{algorithm}"
+        )
+        path.mkdir(parents=True, exist_ok=True)
+        return str(path)
+
+    @property
+    def _store(self) -> Chroma:
+        if not hasattr(self, "_store_cache"):
+            model_slug = self._model_slug(self.model_name)
+            persist_directory = self._persist_directory(
+                self.distance_algorithm, model_slug
+            )
+            print(f"** vector store path: {persist_directory}")
+            store = Chroma(
+                collection_name="fast_subjects",
+                embedding_function=self.embeddings,
+                persist_directory=persist_directory,
+                collection_metadata={"hnsw:space": self.distance_algorithm},
+            )
+            self._store_cache = store
+            self._warmup_store()
+        return self._store_cache
+
+    def _doc_exists(self, doc: Document) -> bool:
+        existing = self._store.get_by_ids([doc.id])
+        return len(existing) > 0
+
+    def _add_doc(self, doc: Document) -> None:
+        self._store.add_documents(documents=[doc], ids=[doc.id])
 
     def hybrid_search(
         self,
@@ -319,7 +321,80 @@ class ChromaVectorStore(VectorStore):
             k=60,
         )
         search = Search().rank(hybrid_rank).limit(k)
-        return self.store.hybrid_search(search)
+        return self._store.hybrid_search(search)
+
+
+def _opensearch_filter_dsl(filter: dict[str, str] | None) -> dict[str, Any] | None:
+    """Convert our metadata filter dict to OpenSearch bool filter DSL.
+
+    metadata is stored under the "metadata" field, so keys become "metadata.<key>".
+    Uses term queries for exact match.
+    """
+    if not filter:
+        return None
+    terms = [
+        {"term": {f"metadata.{key}": value}}
+        for key, value in filter.items()
+    ]
+    return {"bool": {"filter": terms}}
+
+
+class OpenSearchVectorStore(VectorStore):
+    """OpenSearch-backed vector store. Connection (URL, index, user, password) is read from env when the store is first used."""
+
+    @property
+    def _store(self) -> Any:
+        if not hasattr(self, "_store_cache"):
+            url = os.environ.get("OPENSEARCH_URL", "")
+            idx_base = os.environ.get("OPENSEARCH_INDEX", "fast_subjects")
+            model_slug = self._model_slug(self.model_name)
+            idx = f"{idx_base}-{model_slug}-{self.distance_algorithm}"
+            user = os.environ.get("OPENSEARCH_USER")
+            password = os.environ.get("OPENSEARCH_PASSWORD")
+            kwargs: dict[str, Any] = {}
+            if user and password:
+                kwargs["http_auth"] = (user, password)
+            store = OpenSearchVectorSearch(
+                opensearch_url=url,
+                index_name=idx,
+                embedding_function=self.embeddings,
+                **kwargs,
+            )
+            self._store_cache = store
+            self._warmup_store()
+        return self._store_cache
+
+    def _filter_kwargs(self, filter: dict[str, str] | None) -> dict[str, Any]:
+        """OpenSearch uses filter= with a bool query DSL for approximate search."""
+        dsl = _opensearch_filter_dsl(filter)
+        if dsl is None:
+            return {}
+        return {"filter": dsl}
+
+    def _doc_exists(self, doc: Document) -> bool:
+        store = self._store
+        try:
+            return store.client.exists(index=store.index_name, id=doc.id)
+        except Exception:
+            return False
+
+    def _add_doc(self, doc: Document) -> None:
+        self._store.add_texts(
+            [doc.page_content],
+            metadatas=[doc.metadata],
+            ids=[doc.id],
+            space_type=config.OPENSEARCH_SPACE_TYPES[self.distance_algorithm],
+        )
+
+    def hybrid_search(
+        self,
+        query_string: str,
+        k: int = 10,
+        filter: dict[str, str] | None = None,
+        **kwargs: Any,
+    ) -> list[Document]:
+        """Return documents from hybrid (vector + keyword) search."""
+        raise NotImplementedError("OpenSearch hybrid_search (BM25+vector) is not implemented yet.")
 
 
 class Searcher:
@@ -454,6 +529,67 @@ class Searcher:
         return results
 
 
+def migrate_chroma_to_opensearch(
+    model_name: str,
+    distance_algorithm: str,
+    chunk_size: int = 500,
+    chunk_overlap: int = 100,
+    limit: int | None = None,
+) -> int:
+    """Copy vectors from Chroma (same model + distance) into OpenSearch without re-embedding.
+
+    Reads from the Chroma persist directory for the given model and distance_algorithm,
+    then writes to OpenSearch via add_embeddings. Use the same model_name and
+    distance_algorithm as the Chroma DB you want to migrate.
+
+    Args:
+        limit: If set, only migrate this many vectors (first N in collection order).
+
+    Returns:
+        Number of documents migrated.
+    """
+    model_slug = VectorStore._model_slug(model_name)
+    persist_dir = ChromaVectorStore._persist_directory(distance_algorithm, model_slug)
+    if not Path(persist_dir).exists():
+        raise FileNotFoundError(
+            f"Chroma persist directory not found: {persist_dir}. "
+            "Index vectors with --backend chroma --generate-docs first."
+        )
+    client = chromadb.PersistentClient(path=persist_dir)
+    collection = client.get_collection("fast_subjects")
+    result = collection.get(include=["documents", "metadatas", "embeddings"])
+    ids = result["ids"]
+    documents = result["documents"]
+    metadatas = result["metadatas"]
+    embeddings = result["embeddings"]
+    if limit is not None:
+        ids = ids[:limit]
+        documents = documents[:limit]
+        metadatas = metadatas[:limit]
+        embeddings = embeddings[:limit]
+    n = len(ids)
+    if n == 0:
+        print("No documents in Chroma collection; nothing to migrate.")
+        return 0
+    text_embeddings = list(zip(documents, embeddings))
+    opensearch_store = OpenSearchVectorStore(
+        model_name=model_name,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        distance_algorithm=distance_algorithm,
+    )
+    store = opensearch_store._store
+    with timed("migrate Chroma -> OpenSearch"):
+        store.add_embeddings(
+            text_embeddings,
+            ids=ids,
+            metadatas=metadatas,
+            space_type=config.OPENSEARCH_SPACE_TYPES[distance_algorithm],
+        )
+    print(f"Migrated {n} vectors from Chroma to OpenSearch (model={model_slug}, distance={distance_algorithm}).")
+    return n
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="A test script for subject semantic search with langchain"
@@ -469,7 +605,7 @@ def main():
         "--limit-terms",
         "-l",
         type=int,
-        help="Limit the number of subject term vectors generated (if --generate is True).",
+        help="Limit the number of vectors generated (--generate-docs) or migrated (--migrate-from).",
     )
     parser.add_argument(
         "--model_name",
@@ -539,7 +675,7 @@ def main():
         dest="distance_algorithm",
         choices=config.CHROMA_DISTANCE_ALGORITHMS,
         default=config.DEFAULT_DISTANCE_ALGORITHM,
-        help="Chroma distance algorithm for the vector store. Uses a separate DB directory per algorithm (e.g. ...-cosine). Default: %(default)s.",
+        help="Distance algorithm for the vector store (l2, cosine, ip). Uses separate DB/index per algorithm. Default: %(default)s.",
     )
     parser.add_argument(
         "--backend",
@@ -547,6 +683,13 @@ def main():
         choices=("chroma", "opensearch"),
         default=config.VECTOR_STORE_BACKEND,
         help="Vector store backend (chroma or opensearch). Default from env VECTOR_STORE_BACKEND or chroma.",
+    )
+    parser.add_argument(
+        "--migrate-from",
+        choices=("chroma",),
+        default=None,
+        metavar="BACKEND",
+        help="Migrate vectors from the given backend into the current backend (no re-embedding). Requires --backend opensearch when migrating from chroma.",
     )
     args = parser.parse_args()
 
@@ -568,11 +711,26 @@ def main():
                 distance_algorithm=args.distance_algorithm,
             )
         elif backend == "opensearch":
-            raise NotImplementedError(
-                "OpenSearch backend is not implemented yet. Use --backend chroma."
+            vector_store = OpenSearchVectorStore(
+                model_name=args.model_name,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                distance_algorithm=args.distance_algorithm,
             )
         else:
             raise ValueError(f"Unknown backend: {backend!r}")
+
+    if args.migrate_from == "chroma":
+        if backend != "opensearch":
+            raise ValueError("Migration from Chroma requires --backend opensearch.")
+        migrate_chroma_to_opensearch(
+            model_name=args.model_name,
+            distance_algorithm=args.distance_algorithm,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            limit=args.limit_terms,
+        )
+
     with timed("generating docs from JSONSource"):
         if args.generate_docs is True:
             with timed("initializing JSONSource"):
