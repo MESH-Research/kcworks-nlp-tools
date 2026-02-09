@@ -552,11 +552,18 @@ def migrate_chroma_to_opensearch(
     persist_dir = ChromaVectorStore._persist_directory(distance_algorithm, model_slug)
     if not Path(persist_dir).exists():
         raise FileNotFoundError(
-            f"Chroma persist directory not found: {persist_dir}. "
+            f"No Chroma source DB for model {model_name!r} and algorithm {distance_algorithm!r} "
+            f"(path {persist_dir} not found). "
             "Index vectors with --backend chroma --generate-docs first."
         )
     client = chromadb.PersistentClient(path=persist_dir)
-    collection = client.get_collection("fast_subjects")
+    try:
+        collection = client.get_collection("fast_subjects")
+    except Exception as e:
+        raise RuntimeError(
+            f"No Chroma source DB for model {model_name!r} and algorithm {distance_algorithm!r}: "
+            f"collection 'fast_subjects' missing or inaccessible ({e})."
+        ) from e
     result = collection.get(include=["documents", "metadatas", "embeddings"])
     ids = result["ids"]
     documents = result["documents"]
@@ -569,8 +576,10 @@ def migrate_chroma_to_opensearch(
         embeddings = embeddings[:limit]
     n = len(ids)
     if n == 0:
-        print("No documents in Chroma collection; nothing to migrate.")
-        return 0
+        raise ValueError(
+            f"No vectors in Chroma for model {model_name!r} and algorithm {distance_algorithm!r}. "
+            "Index with --backend chroma --generate-docs first."
+        )
     text_embeddings = list(zip(documents, embeddings))
     opensearch_store = OpenSearchVectorStore(
         model_name=model_name,

@@ -39,6 +39,19 @@ For the OpenSearch vector-store backend (optional), run OpenSearch locally:
 
 The image uses OpenSearch 2 (latest stable 2.x) with the k-NN plugin for vector search.
 
+### OpenSearch document schema
+
+Documents are stored by the LangChain OpenSearch integration with this shape (index name: `{OPENSEARCH_INDEX}-{model_slug}-{distance_algorithm}`):
+
+| Field          | Type        | Description |
+|----------------|-------------|-------------|
+| `_id`          | string      | Document id (same as our chunk id, e.g. `{fast_id}-{chunk_index}`). |
+| `vector_field` | `knn_vector` | Embedding vector; dimension and `space_type` (l2 / cosinesimil / innerproduct) come from the model and `config.OPENSEARCH_SPACE_TYPES`. |
+| `text`         | string      | Chunk text (`page_content`). |
+| `metadata`     | object      | Our metadata: `fast_id`, `scheme`, etc. Filters use `metadata.<key>` (e.g. `metadata.scheme`). |
+
+The index mapping is created on first write (by the integration); only the k-NN vector field is explicit in the mapping; `text` and `metadata` use dynamic mapping.
+
 ## Required environment variables
 
 A few required environment variables must be provided in a `.env` file placed at the top level of this project folder (i.e., the same folder that contains this README file). These variables must include:
